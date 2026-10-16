@@ -53,6 +53,10 @@ const files = argv.length > 0
   : readdirSync(FIXTURES).filter((f) => /^scenario-.*\.ya?ml$/.test(f)).sort().map((f) => join(FIXTURES, f));
 
 const baseEnv = { HOME: process.env.HOME, PATH: process.env.PATH, TERM: "xterm" };
+// The herdr terminal backend: seats run in the named herdr session instead of the scaffold's tmux server.
+// Use a dedicated session (herdr --session NAME server), never the one you work in.
+// The scenario HOME is a scratch directory, so the socket is passed as an absolute path.
+for (const key of ["OPENRIG_TERMINAL_BACKEND", "OPENRIG_HERDR_SESSION", "OPENRIG_HERDR_SOCKET"]) if (process.env[key]) baseEnv[key] = process.env[key];
 const deps = { normalizer: (_surface, value) => value }; // v1 identity placeholder (rides 51-03)
 
 let failures = 0;

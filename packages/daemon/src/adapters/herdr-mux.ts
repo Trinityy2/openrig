@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import type { ArgvExecFn, ExecFn } from "./tmux.js";
+import { parentSessionEnvKeys } from "../domain/parent-session-env.js";
 import {
   createHerdrSocketRpc,
   resolveHerdrSocketPath,
@@ -61,6 +62,12 @@ export interface HerdrMuxOptions {
   spawnProcess?: (argv: string[], detached: boolean) => ChildProcess;
   signalProcess?: (pid: number, signal: NodeJS.Signals) => void;
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * The environment a new seat starts from, as a tmux server the daemon starts hands its own environment to every
+   * session. Defaults to the daemon's. The launching session's identity (parent-session-env) and tmux/herdr
+   * attachment variables are left out; herdr sets the pane's own HERDR_* identity.
+   */
+  baseEnv?: NodeJS.ProcessEnv;
 }
 
 interface HerdrPane {
@@ -383,7 +390,7 @@ export class HerdrMux {
 
   private spawn(argv: string[], detached: boolean): ChildProcess {
     if (this.opts.spawnProcess) return this.opts.spawnProcess(argv, detached);
-    return spawn(argv[0]!, argv.slice(1), { detached, stdio: detached ? "ignore" : ["ignore", "pipe", "ignore"] });
+    return spawn(argv[0]!, argv.slice(1), { detached, stdio: detached ? "ignore" : ["ignore", "pipe", "ignore"], env: { ...process.env, HERDR_SOCKET_PATH: this.socketPath } });
   }
 
   private async snapshot(): Promise<HerdrSnapshot> {
@@ -543,6 +550,11 @@ export class HerdrMux {
       const eq = pair.indexOf("=");
       if (eq > 0) env[pair.slice(0, eq)] = pair.slice(eq + 1);
     }
+    const base = this.opts.baseEnv ?? process.env;
+    const dropped = new Set([...parentSessionEnvKeys(base), "TMUX", "TMUX_PANE", "HERDR_SOCKET_PATH", "HERDR_SESSION"]);
+    const launchEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(base)) if (v !== undefined && !dropped.has(k) && !k.startsWith("HERDR_")) launchEnv[k] = v;
+    Object.assign(launchEnv, env);
     const run = async (): Promise<Resolved> => {
       const snap = await this.snapshot();
       if (this.sessions(snap).some((s) => s.name === name)) throw new MuxError(`duplicate session: ${name}`);
@@ -550,10 +562,10 @@ export class HerdrMux {
       const workspace = snap.workspaces.find((w) => w.label === label);
       let root: HerdrPane;
       if (workspace) {
-        const created = await this.request("tab.create", { workspace_id: workspace.workspace_id, cwd: cwd ?? null, env, label: name, focus: false });
+        const created = await this.request("tab.create", { workspace_id: workspace.workspace_id, cwd: cwd ?? null, env: launchEnv, label: name, focus: false });
         root = created["root_pane"] as HerdrPane;
       } else {
-        const created = await this.request("workspace.create", { cwd: cwd ?? null, env, label, focus: false });
+        const created = await this.request("workspace.create", { cwd: cwd ?? null, env: launchEnv, label, focus: false });
         root = created["root_pane"] as HerdrPane;
         const tab = created["tab"] as HerdrTab | undefined;
         if (tab?.tab_id) await this.request("tab.rename", { tab_id: tab.tab_id, label: name });
@@ -864,7 +876,7 @@ export class HerdrMux {
     const words = splitShellWords(sink);
     if (words[0] !== "cat" || words[1] !== ">>" || !words[2] || words.length !== 3) throw new MuxError(`pipe-pane: the herdr backend only supports "cat >> <file>"`);
     const path = words[2];
-    const argv = [this.opts.herdrBin ?? "herdr", ...(this.opts.herdrSession ? ["--session", this.opts.herdrSession] : []), "terminal", "session", "observe", pane.pane_id];
+    const argv = [this.opts.herdrBin ?? "herdr", "terminal", "session", "observe", pane.pane_id];
     const child = this.spawn(argv, false);
     this.pipes.set(pane.terminal_id, child);
     if (child.stdout) {
