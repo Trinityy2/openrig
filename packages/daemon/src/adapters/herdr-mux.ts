@@ -997,7 +997,8 @@ export class HerdrMux {
     if (grid.length === 0) return;
     const wanted = grid.flat();
     const tabId = wanted[0]!.tab_id;
-    const tabPanes = snap.panes.filter((p) => p.tab_id === tabId);
+    // Only seats count: the person's own panes in the tab stay where they are.
+    const tabPanes = snap.panes.filter((p) => p.tab_id === tabId && p.tokens?.[HERDR_SESSION_TOKEN]);
     const label = snap.tabs.find((t) => t.tab_id === tabId)?.label;
     let target = tabId;
     if (!(label === tab.label && tabPanes.length === wanted.length && wanted.every((p) => p.tab_id === tabId) && this.inGridOrder(snap, tabId, grid))) {

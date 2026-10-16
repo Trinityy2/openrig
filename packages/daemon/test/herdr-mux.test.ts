@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   HERDR_SESSION_TOKEN,
   HerdrMux,
@@ -40,6 +40,46 @@ interface FakePane {
 interface FakeTab { tab_id: string; workspace_id: string; label: string }
 interface FakeWorkspace { workspace_id: string; label: string }
 interface Call { method: string; params: Record<string, unknown> }
+/** herdr's per-tab layout tree, as `layout.export` reports it. */
+type FakeNode =
+  | { type: "pane"; pane_id: string }
+  | { type: "split"; direction: "right" | "down"; ratio: number; first: FakeNode; second: FakeNode };
+interface Rect { x: number; y: number; width: number; height: number }
+
+/** The tree with `paneId`'s leaf removed (its sibling takes its parent's place); null when the tree empties. */
+function removeLeaf(node: FakeNode, paneId: string): FakeNode | null {
+  if (node.type === "pane") return node.pane_id === paneId ? null : node;
+  const first = removeLeaf(node.first, paneId);
+  const second = removeLeaf(node.second, paneId);
+  if (!first) return second;
+  if (!second) return first;
+  return { ...node, first, second };
+}
+
+/** The tree with `targetId`'s leaf split: target first, `paneId` second. */
+function splitLeaf(node: FakeNode, targetId: string, paneId: string, direction: "right" | "down"): FakeNode | null {
+  if (node.type === "pane") {
+    return node.pane_id === targetId ? { type: "split", direction, ratio: 0.5, first: node, second: { type: "pane", pane_id: paneId } } : null;
+  }
+  const first = splitLeaf(node.first, targetId, paneId, direction);
+  if (first) return { ...node, first };
+  const second = splitLeaf(node.second, targetId, paneId, direction);
+  return second ? { ...node, second } : null;
+}
+
+function layoutRects(node: FakeNode, area: Rect, out: Map<string, Rect>): Map<string, Rect> {
+  if (node.type === "pane") { out.set(node.pane_id, area); return out; }
+  if (node.direction === "right") {
+    const w = Math.round(area.width * node.ratio);
+    layoutRects(node.first, { ...area, width: w }, out);
+    layoutRects(node.second, { ...area, x: area.x + w, width: area.width - w }, out);
+  } else {
+    const hgt = Math.round(area.height * node.ratio);
+    layoutRects(node.first, { ...area, height: hgt }, out);
+    layoutRects(node.second, { ...area, y: area.y + hgt, height: area.height - hgt }, out);
+  }
+  return out;
+}
 
 class FakeHerdr {
   up = true;
@@ -48,8 +88,9 @@ class FakeHerdr {
   tabs: FakeTab[] = [];
   workspaces: FakeWorkspace[] = [];
   focused: string | null = null;
-  /** Pane size reported in layouts; null leaves layouts empty (the mux falls back to defaults). */
+  /** Each tab's area, split between its panes by the tab's layout tree; null leaves layouts empty (the mux falls back to defaults). */
   rect: { width: number; height: number } | null = { width: 100, height: 30 };
+  trees = new Map<string, FakeNode>();
   /** Tab labels whose creation also opens a second pane in the tab. */
   twoPaneTabs = new Set<string>();
   failures = new Map<string, Error>();
@@ -57,6 +98,8 @@ class FakeHerdr {
   private nextTerminal = 0x1a;
   private nextWorkspace = 1;
   private nextPid = 4242;
+  private nextPaneIndex = new Map<string, number>();
+  private nextTabIndex = new Map<string, number>();
 
   callsOf(method: string): Array<Record<string, unknown>> {
     return this.calls.filter((c) => c.method === method).map((c) => c.params);
@@ -72,10 +115,15 @@ class FakeHerdr {
     return pane;
   }
 
+  private paneIdIn(workspaceId: string): string {
+    const index = (this.nextPaneIndex.get(workspaceId) ?? 0) + 1;
+    this.nextPaneIndex.set(workspaceId, index);
+    return `${workspaceId}:p${index}`;
+  }
+
   private newPane(workspaceId: string, tabId: string, cwd: string | null): FakePane {
-    const index = this.panes.filter((p) => p.workspace_id === workspaceId).length + 1;
     const pane: FakePane = {
-      pane_id: `${workspaceId}:p${index}`,
+      pane_id: this.paneIdIn(workspaceId),
       tab_id: tabId,
       workspace_id: workspaceId,
       terminal_id: `term_${(this.nextTerminal++).toString(16)}`,
@@ -91,10 +139,79 @@ class FakeHerdr {
     return pane;
   }
 
-  /** A second pane in the tab, as a user split would make. */
+  /** A second pane in the tab, as a user split would make (to the right of the whole tab). */
   split(tabId: string): FakePane {
     const tab = this.tabs.find((t) => t.tab_id === tabId)!;
-    return this.newPane(tab.workspace_id, tabId, "/split");
+    const pane = this.newPane(tab.workspace_id, tabId, "/split");
+    const tree = this.trees.get(tabId);
+    const leaf: FakeNode = { type: "pane", pane_id: pane.pane_id };
+    this.trees.set(tabId, tree ? { type: "split", direction: "right", ratio: 0.5, first: tree, second: leaf } : leaf);
+    return pane;
+  }
+
+  /** Each pane's rect in its tab, from the tab's layout tree over the tab's area. */
+  rects(tabId: string): Map<string, Rect> {
+    const tree = this.trees.get(tabId);
+    const area = this.rect ?? { width: 120, height: 40 };
+    return tree ? layoutRects(tree, { x: 0, y: 0, ...area }, new Map()) : new Map();
+  }
+
+  /** The panes of a tab as rows (top to bottom) of session names (left to right). */
+  grid(tabId: string): string[][] {
+    const rects = this.rects(tabId);
+    const rows = new Map<number, Array<{ x: number; name: string }>>();
+    for (const pane of this.panes.filter((p) => p.tab_id === tabId)) {
+      const r = rects.get(pane.pane_id)!;
+      rows.set(r.y, [...(rows.get(r.y) ?? []), { x: r.x, name: pane.tokens?.[HERDR_SESSION_TOKEN] ?? pane.pane_id }]);
+    }
+    return [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, row]) => row.sort((a, b) => a.x - b.x).map((c) => c.name));
+  }
+
+  /** Take a pane's leaf out of its tab's tree; a tab left empty closes, as herdr closes an emptied tab. */
+  private detach(pane: FakePane): void {
+    const tree = this.trees.get(pane.tab_id);
+    const rest = tree ? removeLeaf(tree, pane.pane_id) : null;
+    if (rest) { this.trees.set(pane.tab_id, rest); return; }
+    this.trees.delete(pane.tab_id);
+    if (!this.panes.some((p) => p !== pane && p.tab_id === pane.tab_id)) this.tabs = this.tabs.filter((t) => t.tab_id !== pane.tab_id);
+  }
+
+  private move(pane: FakePane, destination: Record<string, unknown>): void {
+    if (destination["type"] === "new_tab") {
+      const workspaceId = String(destination["workspace_id"]);
+      if (!this.workspaces.some((w) => w.workspace_id === workspaceId)) throw new Error(`herdr error: {"code":"workspace_not_found","message":"workspace ${workspaceId} not found"}`);
+      this.detach(pane);
+      const tab = this.addTab(workspaceId, String(destination["label"] ?? ""));
+      if (pane.workspace_id !== workspaceId) pane.pane_id = this.paneIdIn(workspaceId); // a pane that changes workspace gets a new id
+      pane.tab_id = tab.tab_id;
+      pane.workspace_id = workspaceId;
+      this.trees.set(tab.tab_id, { type: "pane", pane_id: pane.pane_id });
+      return;
+    }
+    if (destination["type"] !== "tab") throw new Error(`herdr error: {"code":"invalid_params","message":"bad destination"}`);
+    const tabId = String(destination["tab_id"]);
+    const tab = this.tabs.find((t) => t.tab_id === tabId);
+    if (!tab) throw new Error(`herdr error: {"code":"tab_not_found","message":"tab ${tabId} not found"}`);
+    const targetId = String(destination["target_pane_id"]);
+    const target = this.panes.find((p) => p.pane_id === targetId && p.tab_id === tabId);
+    if (!target || target === pane) throw new Error(`herdr error: {"code":"pane_not_found","message":"pane ${targetId} not found"}`);
+    const direction = destination["split"] === "down" ? "down" : "right";
+    this.detach(pane);
+    if (pane.workspace_id !== tab.workspace_id) pane.pane_id = this.paneIdIn(tab.workspace_id);
+    pane.tab_id = tabId;
+    pane.workspace_id = tab.workspace_id;
+    this.trees.set(tabId, splitLeaf(this.trees.get(tabId)!, targetId, pane.pane_id, direction)!);
+  }
+
+  private setRatio(params: Record<string, unknown>): void {
+    let node = this.trees.get(String(params["tab_id"]));
+    if (!node) throw new Error(`herdr error: {"code":"tab_not_found","message":"tab not found"}`);
+    for (const second of (params["path"] as boolean[]) ?? []) {
+      if (node.type !== "split") throw new Error(`herdr error: {"code":"invalid_params","message":"bad path"}`);
+      node = second ? node.second : node.first;
+    }
+    if (node.type !== "split") throw new Error(`herdr error: {"code":"invalid_params","message":"path names a pane"}`);
+    node.ratio = Number(params["ratio"]);
   }
 
   private pane(params: Record<string, unknown>): FakePane {
@@ -104,10 +221,18 @@ class FakeHerdr {
     return pane;
   }
 
-  private openTab(workspaceId: string, label: string, cwd: string | null): { tab: FakeTab; root: FakePane } {
-    const tab: FakeTab = { tab_id: `${workspaceId}:t${this.tabs.filter((t) => t.workspace_id === workspaceId).length + 1}`, workspace_id: workspaceId, label };
+  private addTab(workspaceId: string, label: string): FakeTab {
+    const index = (this.nextTabIndex.get(workspaceId) ?? 0) + 1;
+    this.nextTabIndex.set(workspaceId, index);
+    const tab: FakeTab = { tab_id: `${workspaceId}:t${index}`, workspace_id: workspaceId, label };
     this.tabs.push(tab);
+    return tab;
+  }
+
+  private openTab(workspaceId: string, label: string, cwd: string | null): { tab: FakeTab; root: FakePane } {
+    const tab = this.addTab(workspaceId, label);
     const root = this.newPane(workspaceId, tab.tab_id, cwd);
+    this.trees.set(tab.tab_id, { type: "pane", pane_id: root.pane_id });
     return { tab, root };
   }
 
@@ -134,7 +259,10 @@ class FakeHerdr {
             panes: this.panes.map((p) => this.paneView(p)),
             tabs: this.tabs.map((t) => ({ ...t, pane_count: this.panes.filter((p) => p.tab_id === t.tab_id).length })),
             workspaces: this.workspaces.map((w) => ({ ...w })),
-            layouts: this.rect ? this.tabs.map((t) => ({ tab_id: t.tab_id, panes: this.panes.filter((p) => p.tab_id === t.tab_id).map((p) => ({ pane_id: p.pane_id, rect: { ...this.rect! } })) })) : [],
+            layouts: this.rect ? this.tabs.map((t) => {
+              const rects = this.rects(t.tab_id);
+              return { tab_id: t.tab_id, area: { ...this.rect! }, panes: this.panes.filter((p) => p.tab_id === t.tab_id).map((p) => ({ pane_id: p.pane_id, rect: { ...rects.get(p.pane_id)! } })) };
+            }) : [],
             focused_pane_id: this.focused,
           },
         };
@@ -164,21 +292,36 @@ class FakeHerdr {
         if (!this.tabs.some((t) => t.tab_id === id)) throw new Error(`herdr error: {"code":"tab_not_found","message":"tab not found"}`);
         this.tabs = this.tabs.filter((t) => t.tab_id !== id);
         this.panes = this.panes.filter((p) => p.tab_id !== id);
+        this.trees.delete(id);
         return { type: "ok" };
       }
       case "workspace.close": {
         const id = String(params["workspace_id"]);
         if (!this.workspaces.some((w) => w.workspace_id === id)) throw new Error(`herdr error: {"code":"workspace_not_found","message":"workspace not found"}`);
         this.workspaces = this.workspaces.filter((w) => w.workspace_id !== id);
+        for (const t of this.tabs) if (t.workspace_id === id) this.trees.delete(t.tab_id);
         this.tabs = this.tabs.filter((t) => t.workspace_id !== id);
         this.panes = this.panes.filter((p) => p.workspace_id !== id);
         return { type: "ok" };
       }
       case "pane.close": {
         const pane = this.pane(params);
+        this.detach(pane);
         this.panes = this.panes.filter((p) => p !== pane);
         return { type: "ok" };
       }
+      case "pane.move": {
+        const pane = this.pane(params);
+        this.move(pane, (params["destination"] ?? {}) as Record<string, unknown>);
+        return { type: "pane_move", move_result: { pane: this.paneView(pane) } };
+      }
+      case "layout.export": {
+        const tabId = String(params["tab_id"]);
+        const tree = this.trees.get(tabId);
+        if (!tree) throw new Error(`herdr error: {"code":"tab_not_found","message":"tab ${tabId} not found"}`);
+        return { type: "layout_export", layout: { tab_id: tabId, root: structuredClone(tree) } };
+      }
+      case "layout.set_split_ratio": this.setRatio(params); return { type: "ok" };
       case "pane.report_metadata": this.pane(params).tokens = { ...(params["tokens"] as Record<string, string>) }; return { type: "ok" };
       case "pane.process_info": {
         const pane = this.pane(params);
@@ -460,21 +603,24 @@ describe("listings", () => {
     // No layout: the default 120x40.
     h.fake.rect = null;
     expect(await h.adapter.listPanes("lp@r")).toMatchObject([{ width: 120, height: 40 }]);
-    // A split adds a second pane in order, root first.
-    const second = h.fake.split(pane.tab_id);
-    const panes = await h.adapter.listPanes("lp@r");
-    expect(panes.map((p) => [p.id, p.index, p.cwd])).toEqual([[PANE_ID(pane.terminal_id), 0, "/work"], [PANE_ID(second.terminal_id), 1, "/split"]]);
-    expect(await h.adapter.listWindows("lp@r")).toMatchObject([{ panes: 2 }]);
+    // A session is its one pane: a split in its tab (another seat or the person's own pane) is not part of it,
+    // but it does take its share of the tab.
+    h.fake.split(pane.tab_id);
+    expect(await h.adapter.listPanes("lp@r")).toMatchObject([{ id: PANE_ID(pane.terminal_id), index: 0, cwd: "/work" }]);
+    expect(await h.adapter.listWindows("lp@r")).toMatchObject([{ panes: 1 }]);
+    h.fake.rect = { width: 100, height: 30 };
+    expect(await h.adapter.listPanes("lp@r")).toMatchObject([{ width: 50, height: 30 }]);
   });
 
-  // BUG: render() sets pane_active for the root pane unconditionally (`r.pane === r.session.root || r.pane.focused`),
-  // so when the user focuses a split pane both panes report active; tmux reports exactly one active pane per window.
-  it("only the focused pane is active when a split is focused ", async () => {
+  it("focusing a neighbour pane in the seat's tab leaves the seat's one pane active and the seat unattached", async () => {
     const pane = await create("act@r");
     const second = h.fake.split(pane.tab_id);
     h.fake.focused = second.pane_id;
-    const panes = await h.adapter.listPanes("act@r");
-    expect(panes.map((p) => p.active)).toEqual([false, true]);
+    expect((await h.adapter.listPanes("act@r")).map((p) => p.active)).toEqual([true]);
+    expect((await h.adapter.listSessions()).map((s) => s.attached)).toEqual([false]);
+    expect(await h.adapter.listClients()).toEqual([]);
+    h.fake.focused = pane.pane_id;
+    expect((await h.adapter.listSessions()).map((s) => s.attached)).toEqual([true]);
   });
 
   it("missing sessions: listPanes/listWindows throw can't find session; no server gives []", async () => {
@@ -521,15 +667,16 @@ describe("target resolution and pane ids", () => {
     for (const t of [`%${n}`, `$${n}`, `@${n}`, "=res@r", "=res@r:", "res@r", "res@r:0", "res@r:0.0"]) expect(await show(t)).toBe(expected);
   });
 
-  it("a split pane resolves by its own %N and by name:0.1; misses name the target", async () => {
+  it("a split pane in a seat's tab is not the seat's: it resolves neither by %N nor as name:0.1; misses name the target", async () => {
     const pane = await create("res@r");
     const second = h.fake.split(pane.tab_id);
     const id = (t: string) => h.mux.argvExec(["tmux", "display-message", "-p", "-t", t, "#{pane_id} #{pane_index}"]);
-    expect(await id(PANE_ID(second.terminal_id))).toBe(`${PANE_ID(second.terminal_id)} 1\n`);
-    expect(await id("res@r:0.1")).toBe(`${PANE_ID(second.terminal_id)} 1\n`);
-    // Unqualified targets prefer the focused pane, as tmux's active pane.
+    await expect(id(PANE_ID(second.terminal_id))).rejects.toThrow(`can't find pane: ${PANE_ID(second.terminal_id)}`);
+    await expect(id("res@r:0.1")).rejects.toThrow("can't find pane: 1");
+    // Focus on the neighbour does not move the seat's target off its own pane.
     h.fake.focused = second.pane_id;
-    expect(await id("=res@r:")).toBe(`${PANE_ID(second.terminal_id)} 1\n`);
+    expect(await id("=res@r:")).toBe(`${PANE_ID(pane.terminal_id)} 0\n`);
+    expect(await id("res@r:0.0")).toBe(`${PANE_ID(pane.terminal_id)} 0\n`);
     await expect(id("res@r:0.5")).rejects.toThrow("can't find pane: 5");
     await expect(id("%999")).rejects.toThrow("can't find pane: %999");
     await expect(id("$999")).rejects.toThrow("can't find session: $999");
@@ -960,11 +1107,15 @@ describe("respawnPane", () => {
 // ------------------------------------------------------------------ kill and probe sessions
 
 describe("killSession and probe sessions", () => {
-  it("killSession closes the tab and the session disappears", async () => {
+  it("killSession closes only the seat's pane, leaving a neighbour in its tab; the session disappears", async () => {
     const pane = await create("k@r");
+    const neighbour = h.fake.split(pane.tab_id);
     await create("other@r");
     expect(await h.adapter.killSession("k@r")).toEqual({ ok: true });
-    expect(h.fake.callsOf("tab.close")).toEqual([{ tab_id: pane.tab_id }]);
+    expect(h.fake.callsOf("pane.close")).toEqual([{ pane_id: pane.pane_id }]);
+    expect(h.fake.callsOf("tab.close")).toEqual([]);
+    expect(h.fake.panes).toContain(neighbour);
+    expect(h.fake.tabs.map((t) => t.tab_id)).toContain(pane.tab_id);
     expect(await h.adapter.probeSession("k@r")).toEqual({ state: "absent" });
     expect((await h.adapter.listSessions()).map((s) => s.name)).toEqual(["other@r"]);
     expect(await h.adapter.killSession("k@r")).toMatchObject({ ok: false, code: "session_not_found" });
@@ -976,12 +1127,24 @@ describe("killSession and probe sessions", () => {
     expect(h.fake.callsOf("workspace.create")[0]).toMatchObject({ label: "openrig", cwd: "/tmp" });
   });
 
-  it("createProbeSession removes an unusable (two-pane) helper through if-shell", async () => {
+  // A session is one pane, so a second pane in the helper's tab no longer makes it unusable: the probe is fine.
+  it("createProbeSession whose tab holds a second pane is still one pane, ready for input", async () => {
     await create("seed@openrig"); // so the probe's tab comes from tab.create
     h.fake.twoPaneTabs.add("probe-2");
+    expect(await h.adapter.createProbeSession("probe-2")).toEqual({ ok: true });
+    expect(await h.adapter.listPanes("probe-2")).toHaveLength(1);
+  });
+
+  // An unusable helper is now one whose new pane id a managed record already names (a stale binding): it is
+  // removed through if-shell, which closes only its pane.
+  it("createProbeSession removes an unusable helper (pane named by a managed record) through if-shell", async () => {
+    await create("seed@openrig");
+    const probeId = "%27"; // term_1b: the next terminal after seed's term_1a
+    h.adapter.deliveryGuard = { maybeTarget: (t: string) => (t === probeId ? { session: "stale@r" } : null) } as unknown as TmuxAdapter["deliveryGuard"];
     const result = await h.adapter.createProbeSession("probe-2");
-    expect(result).toEqual({ ok: false, code: "guard_target_unknown", message: "New probe pane could not be established; no input written." });
-    expect(h.fake.callsOf("tab.close")).toHaveLength(1);
+    expect(result).toEqual({ ok: false, code: "guard_target_unknown", message: "New probe pane is named by a managed record; no input written." });
+    expect(h.fake.callsOf("pane.close")).toHaveLength(1);
+    h.adapter.deliveryGuard = undefined;
     expect(await h.adapter.probeSession("probe-2")).toEqual({ state: "absent" });
     expect(await h.adapter.probeSession("seed@openrig")).toEqual({ state: "present" });
   });
@@ -1026,6 +1189,146 @@ describe("killSession and probe sessions", () => {
     await create("if@r");
     await expect(h.mux.argvExec(["tmux", "if-shell", "-t", "if@r", "true", "kill-session -t if@r"])).rejects.toThrow("unsupported condition");
     expect(await h.adapter.probeSession("if@r")).toEqual({ state: "present" });
+  });
+});
+
+// ------------------------------------------------------------------ layouts
+
+describe("layouts", () => {
+  const GRID = [["a@r", "b@r", "c@r", "d@r"], ["e@r", "f@r", "g@r", "h@r"]];
+  let layoutPath: string;
+
+  function writeLayout(rows: string[][] = GRID): void {
+    writeFileSync(layoutPath, JSON.stringify({ workspaces: [{ label: "Team", tabs: [{ label: "grid", rows }] }] }));
+  }
+
+  /** Fire the debounced arrange timer, then wait for the arrange it queued on the create lock. */
+  async function settle(mux: HerdrMux = h.mux): Promise<void> {
+    await vi.advanceTimersByTimeAsync(500);
+    await (mux as unknown as { createLock: Promise<unknown> }).createLock;
+  }
+
+  /** Column widths of each row of the tab, from the fake's rects. */
+  function widths(tabId: string): number[][] {
+    const rects = h.fake.rects(tabId);
+    const byName = new Map(h.fake.panes.filter((p) => p.tab_id === tabId).map((p) => [p.tokens?.[HERDR_SESSION_TOKEN], rects.get(p.pane_id)!] as const));
+    return h.fake.grid(tabId).map((row) => row.map((n) => byName.get(n)!.width));
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    layoutPath = join(scratch, "herdr-layout.json");
+    h.mux.close();
+    h = harness({ layoutPath });
+    h.fake.rect = { width: 120, height: 40 };
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("a layout seat lands in the layout's workspace; a seat not in the layout keeps its rig workspace and own tab", async () => {
+    writeLayout();
+    const a = await create("c@r");
+    expect(h.fake.workspaces.find((w) => w.workspace_id === a.workspace_id)?.label).toBe("Team");
+    const z = await create("z@r");
+    expect(h.fake.workspaces.find((w) => w.workspace_id === z.workspace_id)?.label).toBe("r");
+    expect(h.fake.tabs.find((t) => t.tab_id === z.tab_id)?.label).toBe("z@r");
+    await settle();
+    expect(h.fake.paneOf("z@r").tab_id).toBe(z.tab_id);
+    expect(h.fake.callsOf("pane.move").map((m) => m["pane_id"])).not.toContain(z.pane_id);
+  });
+
+  it("8 seats created in any order end in one tab with the layout's label, rows in order, all splits equal", async () => {
+    writeLayout();
+    for (const name of ["g@r", "a@r", "h@r", "c@r", "e@r", "b@r", "f@r", "d@r"]) await create(name);
+    expect(h.fake.callsOf("pane.move")).toEqual([]); // debounced: nothing moves mid-burst
+    await settle();
+    const team = h.fake.workspaces.find((w) => w.label === "Team")!;
+    const tabs = h.fake.tabs.filter((t) => t.workspace_id === team.workspace_id);
+    expect(tabs.map((t) => t.label)).toEqual(["grid"]);
+    const tabId = tabs[0]!.tab_id;
+    expect(h.fake.grid(tabId)).toEqual(GRID);
+    // Every pane keeps its terminal and session token through the moves.
+    expect((await h.adapter.listSessions()).map((s) => s.name).sort()).toEqual(GRID.flat().sort());
+    // Root splits the rows 1/2; each row is a | (b | (c | d)) at 1/4, 1/3, 1/2.
+    const tree = h.fake.trees.get(tabId)!;
+    expect(tree).toMatchObject({ type: "split", direction: "down", ratio: 0.5 });
+    const row = (tree as { first: { ratio: number; second: { ratio: number; second: { ratio: number } } } }).first;
+    expect([row.ratio, row.second.ratio, row.second.second.ratio]).toEqual([1 / 4, 1 / 3, 1 / 2]);
+    for (const ws of widths(tabId)) for (const w of ws) expect(Math.abs(w - 30)).toBeLessThanOrEqual(1);
+    const heights = h.fake.panes.filter((p) => p.tab_id === tabId).map((p) => h.fake.rects(tabId).get(p.pane_id)!.height);
+    expect(new Set(heights)).toEqual(new Set([20]));
+  });
+
+  it("an already-arranged tab triggers no pane.move (nor ratio change) on re-arrange", async () => {
+    writeLayout();
+    for (const name of GRID.flat()) await create(name);
+    await settle();
+    h.fake.calls = [];
+    await h.mux.arrangeAll();
+    expect(h.fake.callsOf("pane.move")).toEqual([]);
+    expect(h.fake.callsOf("layout.set_split_ratio")).toEqual([]);
+  });
+
+  it("killing a seat closes its pane and re-equalizes the rest without moving them", async () => {
+    writeLayout();
+    for (const name of GRID.flat()) await create(name);
+    await settle();
+    const tabId = h.fake.paneOf("a@r").tab_id;
+    h.fake.calls = [];
+    expect(await h.adapter.killSession("c@r")).toEqual({ ok: true });
+    await settle();
+    expect(h.fake.callsOf("pane.move")).toEqual([]);
+    expect(h.fake.grid(tabId)).toEqual([["a@r", "b@r", "d@r"], ["e@r", "f@r", "g@r", "h@r"]]);
+    const [top, bottom] = widths(tabId);
+    for (const w of top!) expect(Math.abs(w - 40)).toBeLessThanOrEqual(1);
+    for (const w of bottom!) expect(Math.abs(w - 30)).toBeLessThanOrEqual(1);
+  });
+
+  it("seats started before the layout existed join the layout tab once a layout seat creates its workspace", async () => {
+    await create("a@r");
+    await create("b@r");
+    await settle();
+    writeLayout([["a@r", "b@r", "c@r"]]);
+    await h.mux.arrangeAll(); // no "Team" workspace yet: nothing to arrange into
+    expect(h.fake.callsOf("pane.move")).toEqual([]);
+    await create("c@r");
+    await settle();
+    const tabId = h.fake.paneOf("c@r").tab_id;
+    expect(h.fake.tabs.find((t) => t.tab_id === tabId)?.label).toBe("grid");
+    expect(h.fake.grid(tabId)).toEqual([["a@r", "b@r", "c@r"]]);
+  });
+
+  // BUG: arrangeTab treats any extra pane in the layout tab (tabPanes.length !== wanted.length) as "not arranged" and
+  // rebuilds: the next create/kill/arrangeAll moves every seat out into a NEW "grid" tab, leaving the person's own
+  // pane behind alone in the old one. A non-seat pane should not count against the tab already matching.
+  it("a person's own pane split into the layout tab is left in place by a later arrange", async () => {
+    writeLayout([["a@r", "b@r"]]);
+    await create("a@r");
+    await create("b@r");
+    await settle();
+    const tabId = h.fake.paneOf("a@r").tab_id;
+    const own = h.fake.split(tabId);
+    h.fake.calls = [];
+    await h.mux.arrangeAll();
+    expect(h.fake.callsOf("pane.move")).toEqual([]);
+    expect(h.fake.paneOf("a@r").tab_id).toBe(own.tab_id);
+  });
+
+  it("a missing or invalid layout file keeps the old placement and never arranges", async () => {
+    for (const content of [null, "{not json", JSON.stringify({ nope: true })]) {
+      if (content === null) rmSync(layoutPath, { force: true }); else writeFileSync(layoutPath, content);
+      const fake = new FakeHerdr();
+      const local = harness({ fake, layoutPath });
+      for (const name of ["a@r", "b@r"]) expect(await local.adapter.createSession(name)).toEqual({ ok: true });
+      await settle(local.mux);
+      await local.mux.arrangeAll();
+      expect(fake.workspaces.map((w) => w.label)).toEqual(["r"]);
+      expect(fake.tabs.map((t) => t.label)).toEqual(["a@r", "b@r"]);
+      expect(fake.callsOf("pane.move")).toEqual([]);
+      expect(fake.callsOf("layout.export")).toEqual([]);
+      local.mux.close();
+    }
   });
 });
 
