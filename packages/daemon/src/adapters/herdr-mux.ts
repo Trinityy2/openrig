@@ -523,7 +523,7 @@ export class HerdrMux {
       pane_current_path: r.pane.foreground_cwd || r.pane.cwd || "",
       pane_width: String(size.width),
       pane_height: String(size.height),
-      pane_active: r.pane === r.session.root || r.pane.focused ? "1" : "0",
+      pane_active: r.pane === (r.session.panes.find((x) => x.focused) ?? r.session.root) ? "1" : "0",
       pane_pid: info && info.shellPid > 0 ? String(info.shellPid) : "",
       pane_current_command: info?.command ?? "",
       pane_dead: info && remain && info.shellForeground ? "1" : "0",
@@ -561,17 +561,27 @@ export class HerdrMux {
       const label = herdrWorkspaceLabel(name);
       const workspace = snap.workspaces.find((w) => w.label === label);
       let root: HerdrPane;
+      let undo: () => Promise<unknown>;
       if (workspace) {
         const created = await this.request("tab.create", { workspace_id: workspace.workspace_id, cwd: cwd ?? null, env: launchEnv, label: name, focus: false });
         root = created["root_pane"] as HerdrPane;
+        const tabId = (created["tab"] as HerdrTab | undefined)?.tab_id ?? root?.tab_id;
+        undo = () => this.request("tab.close", { tab_id: tabId });
       } else {
         const created = await this.request("workspace.create", { cwd: cwd ?? null, env: launchEnv, label, focus: false });
         root = created["root_pane"] as HerdrPane;
-        const tab = created["tab"] as HerdrTab | undefined;
-        if (tab?.tab_id) await this.request("tab.rename", { tab_id: tab.tab_id, label: name });
+        const workspaceId = (created["workspace"] as HerdrWorkspace | undefined)?.workspace_id ?? root?.workspace_id;
+        undo = () => this.request("workspace.close", { workspace_id: workspaceId });
       }
-      if (!root?.pane_id || !root.terminal_id) throw new MuxError("herdr did not report the new pane");
-      await this.request("pane.report_metadata", { pane_id: root.pane_id, source: METADATA_SOURCE, tokens: { [HERDR_SESSION_TOKEN]: name } });
+      // Until the token is on it, nothing can find this tab again: a failure closes it.
+      try {
+        if (!root?.pane_id || !root.terminal_id) throw new MuxError("herdr did not report the new pane");
+        if (!workspace && root.tab_id) await this.request("tab.rename", { tab_id: root.tab_id, label: name });
+        await this.request("pane.report_metadata", { pane_id: root.pane_id, source: METADATA_SOURCE, tokens: { [HERDR_SESSION_TOKEN]: name } });
+      } catch (err) {
+        await undo().catch(() => undefined);
+        throw err;
+      }
       this.state.sessions[root.terminal_id] = { name, created: Math.floor(this.now() / 1000), env: { ...env }, options: {}, paneOptions: {} };
       this.saveState();
       const after = await this.snapshot();
@@ -602,11 +612,8 @@ export class HerdrMux {
     const name = /#\{==:#\{session_name\},(.*?)\}/.exec(condition)?.[1];
     const created = /#\{==:#\{session_created\},(\d+)\}/.exec(condition)?.[1];
     if (!p.bools.has("F") || name === undefined || created === undefined) throw new MuxError("if-shell: unsupported condition for the herdr backend");
-    let holds = false;
-    try {
-      const { session } = await this.resolve(flag(p, "t") ?? "", "session");
-      holds = session.name === name && String(session.state.created) === created;
-    } catch { /* gone: the condition is false */ }
+    const { session } = await this.resolve(flag(p, "t") ?? "", "session");
+    const holds = session.name === name && String(session.state.created) === created;
     const chosen = holds ? then : otherwise;
     return chosen ? this.execArgv(["tmux", ...splitShellWords(chosen)]) : "";
   }
@@ -645,10 +652,13 @@ export class HerdrMux {
 
   private async displayMessage(p: ParsedArgs): Promise<string> {
     const target = flag(p, "t");
+    const format = p.positionals.join(" ");
+    // A message with no format variables needs no target (if-shell's `display-message -p kept`).
+    if (target === undefined && !format.includes("#{")) return p.bools.has("p") ? `${format}\n` : "";
     if (target === undefined) throw new MuxError("no current client");
     const snap = await this.snapshot();
     const resolved = await this.resolve(target, "pane", snap);
-    const text = await this.render(p.positionals.join(" "), resolved, snap);
+    const text = await this.render(format, resolved, snap);
     return p.bools.has("p") ? `${text}\n` : "";
   }
 
@@ -821,12 +831,15 @@ export class HerdrMux {
     const { session, pane } = await this.resolve(flag(p, "t") ?? "", "pane");
     const info = await this.processInfo(pane);
     if (!info) throw new MuxError(`respawn pane failed: can't read pane ${flag(p, "t")}`);
+    let shellInfo: ProcessInfo | null = info;
     if (!info.shellForeground) {
+      shellInfo = null;
       if (!p.bools.has("k")) throw new MuxError(`respawn pane failed: pane ${flag(p, "t")} still active`);
       if (info.foregroundGroup && info.foregroundGroup !== info.shellPid) this.signal(-info.foregroundGroup, "SIGKILL");
       for (let i = 0; i < 40; i++) {
         await this.sleep(50);
-        if ((await this.processInfo(pane))?.shellForeground) break;
+        const after = await this.processInfo(pane);
+        if (after?.shellForeground) { shellInfo = after; break; }
       }
     }
     const env: Record<string, string | null> = { ...session.state.env };
@@ -838,9 +851,11 @@ export class HerdrMux {
     const command = p.positionals.join(" ");
     const defaultShell = this.state.serverOptions["default-shell"] ?? process.env.SHELL ?? "";
     const shellName = (s: string) => s.split("/").pop()?.replace(/^-/, "") ?? "";
-    // A respawn into a blank shell: the pane's own shell already is one; carry the cwd and env into it.
-    const blank = !command || shellName(command) === shellName(defaultShell) || shellName(command) === info.command;
-    await this.typeScript(pane, blank ? "" : `exec /bin/sh -c ${shellQuote(command)}`, { cwd, env, inShell: blank, shell: info.command });
+    // A respawn into a blank shell (the command is just a shell binary): the pane's own shell already is one, so
+    // carry the cwd and env into it.
+    const shells = [shellName(defaultShell), shellInfo?.command ?? ""].filter(Boolean);
+    const blank = !command || (/^\S+$/.test(command) && shells.includes(shellName(command)));
+    await this.typeScript(pane, blank ? "" : `exec /bin/sh -c ${shellQuote(command)}`, { cwd, env, inShell: blank, shell: shellInfo?.command ?? null });
     return "";
   }
 

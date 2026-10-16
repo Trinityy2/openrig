@@ -166,6 +166,14 @@ class FakeHerdr {
         this.panes = this.panes.filter((p) => p.tab_id !== id);
         return { type: "ok" };
       }
+      case "workspace.close": {
+        const id = String(params["workspace_id"]);
+        if (!this.workspaces.some((w) => w.workspace_id === id)) throw new Error(`herdr error: {"code":"workspace_not_found","message":"workspace not found"}`);
+        this.workspaces = this.workspaces.filter((w) => w.workspace_id !== id);
+        this.tabs = this.tabs.filter((t) => t.workspace_id !== id);
+        this.panes = this.panes.filter((p) => p.workspace_id !== id);
+        return { type: "ok" };
+      }
       case "pane.close": {
         const pane = this.pane(params);
         this.panes = this.panes.filter((p) => p !== pane);
@@ -380,7 +388,7 @@ describe("createSession", () => {
   // BUG: when pane.report_metadata (or the tab.rename) fails after workspace.create/tab.create succeeded, newSession
   // throws but leaves the new herdr tab open without its openrig_session token. OpenRig can never see or clean it up
   // (sessions() only knows tokened panes), and a retry opens another tab.
-  it.fails("a create that fails after herdr made the tab closes that tab (BUG: untagged tab leaks)", async () => {
+  it("a create that fails after herdr made the tab closes that tab", async () => {
     h.fake.failures.set("pane.report_metadata", new Error(`herdr error: {"code":"internal","message":"boom"}`));
     const result = await h.adapter.createSession("leak@r");
     expect(result.ok).toBe(false);
@@ -461,7 +469,7 @@ describe("listings", () => {
 
   // BUG: render() sets pane_active for the root pane unconditionally (`r.pane === r.session.root || r.pane.focused`),
   // so when the user focuses a split pane both panes report active; tmux reports exactly one active pane per window.
-  it.fails("only the focused pane is active when a split is focused (BUG: root is always active)", async () => {
+  it("only the focused pane is active when a split is focused ", async () => {
     const pane = await create("act@r");
     const second = h.fake.split(pane.tab_id);
     h.fake.focused = second.pane_id;
@@ -529,9 +537,10 @@ describe("target resolution and pane ids", () => {
     await expect(id("=nope")).rejects.toThrow("can't find session: nope");
   });
 
-  it("display-message without -t has no current client; without -p prints nothing", async () => {
+  it("display-message without -t prints literal text but has no current client for a format; without -p prints nothing", async () => {
     await create("dm@r");
-    await expect(h.mux.argvExec(["tmux", "display-message", "-p", "x"])).rejects.toThrow("no current client");
+    expect(await h.mux.argvExec(["tmux", "display-message", "-p", "x"])).toBe("x\n");
+    await expect(h.mux.argvExec(["tmux", "display-message", "-p", "#{pane_id}"])).rejects.toThrow("no current client");
     expect(await h.mux.argvExec(["tmux", "display-message", "-t", "dm@r", "x"])).toBe("");
   });
 
@@ -908,7 +917,7 @@ describe("respawnPane", () => {
   // BUG: respawnPane decides "blank shell" with `command.split("/").pop()`, i.e. the text after the LAST slash of the
   // whole command line, not its executable. A command whose last path argument ends in the shell's name is taken for
   // a blank respawn and silently dropped: only cd/exports are sourced and `tail` never runs.
-  it.fails("a command whose last argument path ends in the shell name still runs (BUG: treated as blank)", async () => {
+  it("a command whose last argument path ends in the shell name still runs ", async () => {
     await create("rp@r");
     await h.adapter.setServerOption("default-shell", "/bin/zsh");
     await h.adapter.respawnPane("rp@r", "tail -f /var/log/zsh");
@@ -932,7 +941,7 @@ describe("respawnPane", () => {
   // BUG: with -k, the "blank shell" check compares the command against info.command read BEFORE the kill, i.e. the
   // job being killed. `respawn-pane -k -t %N claude` while claude runs kills claude and then only sources cd/exports:
   // the new claude never starts.
-  it.fails("-k respawning the command that is running restarts it (BUG: taken for a blank shell)", async () => {
+  it("-k respawning the command that is running restarts it ", async () => {
     const pane = await create("rp@r");
     pane.job = { pid: 5000, name: "claude" };
     const signals: Array<[number, NodeJS.Signals]> = [];
@@ -996,7 +1005,7 @@ describe("killSession and probe sessions", () => {
   // BUG: ifShell runs the else-branch `display-message -p kept` with no -t, and displayMessage throws
   // "no current client" without a target. tmux prints "kept" (the if-shell target is the command's context), so the
   // adapter returns guard_target_changed; through herdr it gets { code: "unknown", message: "no current client" }.
-  it.fails("removeCreatedSession keeps a session whose creation time changed (BUG: else-branch throws)", async () => {
+  it("removeCreatedSession keeps a session whose creation time changed", async () => {
     const pane = await create("rm@r");
     const id = `$${herdrTerminalNumber(pane.terminal_id)}`;
     const result = await (h.adapter as unknown as Remover).removeCreatedSession("rm@r", { id, at: "1" });
@@ -1008,7 +1017,7 @@ describe("killSession and probe sessions", () => {
   // (session_not_found, which createProbeSession accepts silently); the mux swallows the resolve error, takes the
   // else-branch, and fails with "no current client" (code unknown), so createProbeSession appends
   // "The helper session was not removed: no current client".
-  it.fails("removeCreatedSession on a gone id is session_not_found (BUG: no current client)", async () => {
+  it("removeCreatedSession on a gone id is session_not_found", async () => {
     const result = await (h.adapter as unknown as Remover).removeCreatedSession("x", { id: "$424242", at: "1" });
     expect(result).toMatchObject({ ok: false, code: "session_not_found" });
   });
@@ -1076,7 +1085,7 @@ describe("pipe-pane", () => {
     expect(await h.adapter.startPipePane("pp@r", sink)).toEqual({ ok: true });
     expect(h.spawned).toHaveLength(1);
     const { argv, detached, child } = h.spawned[0]!;
-    expect(argv).toEqual(["herdr", "--session", "testsess", "terminal", "session", "observe", pane.pane_id]);
+    expect(argv).toEqual(["herdr", "terminal", "session", "observe", pane.pane_id]);
     expect(detached).toBe(false);
     child.stdout!.write(`${JSON.stringify({ type: "terminal.frame", bytes: Buffer.from("hello ").toString("base64") })}\n`);
     child.stdout!.write("not json\n");
