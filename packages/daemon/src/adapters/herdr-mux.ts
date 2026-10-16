@@ -378,7 +378,7 @@ export class HerdrMux {
   private async ensureServer(): Promise<void> {
     if ((await this.version()) !== null) return;
     if (this.opts.autoStart === false) throw new MuxError(`no server running on ${this.socketPath}`);
-    const argv = [this.opts.herdrBin ?? "herdr", ...(this.opts.herdrSession ? ["--session", this.opts.herdrSession] : []), "server"];
+    const argv = [this.opts.herdrBin ?? "herdr", ...(this.opts.herdrSession && !this.opts.socketPath ? ["--session", this.opts.herdrSession] : []), "server"];
     const child = this.spawn(argv, true);
     child.unref();
     for (let i = 0; i < 40; i++) {

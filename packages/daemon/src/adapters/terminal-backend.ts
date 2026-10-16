@@ -38,7 +38,8 @@ export function resolveTerminalBackend(env: NodeJS.ProcessEnv, settings?: Termin
 
 /** `--session NAME` for a herdr CLI call when the backend names a herdr session; otherwise nothing. */
 export function herdrCliArgs(backend: TerminalBackend): string[] {
-  return backend.kind === "herdr" && backend.herdrSession ? ["--session", backend.herdrSession] : [];
+  // An explicit socket wins: `--session` would derive a socket path of its own from HOME.
+  return backend.kind === "herdr" && backend.herdrSession && !backend.socketPath ? ["--session", backend.herdrSession] : [];
 }
 
 /**

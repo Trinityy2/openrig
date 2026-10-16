@@ -1032,12 +1032,12 @@ describe("killSession and probe sessions", () => {
 // ------------------------------------------------------------------ server, clients, pipes
 
 describe("server start", () => {
-  it("startServer spawns `herdr --session X server` when ping fails, then waits for it", async () => {
+  it("startServer spawns `herdr server` (the explicit socket wins over --session) when ping fails, then waits for it", async () => {
     const local = harness({ onSpawn: () => { local.fake.up = true; } });
     local.fake.up = false;
     expect(await local.adapter.startServer()).toEqual({ ok: true });
     expect(local.spawned).toHaveLength(1);
-    expect(local.spawned[0]!.argv).toEqual(["herdr", "--session", "testsess", "server"]);
+    expect(local.spawned[0]!.argv).toEqual(["herdr", "server"]);
     expect(local.spawned[0]!.detached).toBe(true);
     expect(local.spawned[0]!.child.unrefed).toBe(true);
   });
