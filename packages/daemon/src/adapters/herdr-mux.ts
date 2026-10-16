@@ -83,7 +83,7 @@ interface HerdrPane {
   focused?: boolean;
   revision?: number;
   tokens?: Record<string, string>;
-  scroll?: { viewport_rows?: number };
+  scroll?: { viewport_rows?: number; max_offset_from_bottom?: number };
 }
 interface HerdrTab { tab_id: string; workspace_id: string; label?: string; pane_count?: number }
 interface HerdrWorkspace { workspace_id: string; label?: string }
@@ -362,6 +362,14 @@ export class HerdrMux {
   // ---------------------------------------------------------------- herdr access
 
   private async request(method: string, params: Record<string, unknown>): Promise<HerdrResult> {
+    // OPENRIG_HERDR_TRACE=<file> records every herdr request the daemon makes (method, target, read shape).
+    const trace = process.env.OPENRIG_HERDR_TRACE;
+    if (trace) {
+      try {
+        const { text: _t, env: _e, ...shape } = params;
+        appendFileSync(trace, `${new Date().toISOString()} ${method} ${JSON.stringify(shape)}\n`);
+      } catch { /* tracing never affects the request */ }
+    }
     try {
       return await this.rpc({ id: `openrig-mux-${++this.counter}`, method, params });
     } catch (err) {
@@ -703,7 +711,11 @@ export class HerdrMux {
     const rows = this.paneSize(snap, pane).height;
     let source = "visible";
     let lines: number | null = null;
-    if (start !== undefined && start !== "0") {
+    // A pane with no scrollback (a fullscreen app on the alternate screen, such as fullscreen Claude) has nothing
+    // above its screen to read, and herdr serves a history read of a displayed pane by scrolling the app itself:
+    // fullscreen Claude visibly scrolls through its conversation and back. Read its screen instead.
+    const noHistory = pane.scroll?.max_offset_from_bottom === 0;
+    if (start !== undefined && start !== "0" && !noHistory) {
       source = p.bools.has("J") ? "recent_unwrapped" : "recent";
       const history = start === "-" ? MAX_READ_LINES : Math.abs(Number.parseInt(start, 10)) || 0;
       lines = Math.min(MAX_READ_LINES, history + rows);

@@ -23,6 +23,8 @@ import type { HerdrResult, HerdrSocketRpc } from "../src/domain/terminal/herdr-t
 
 interface FakeJob { pid: number; name: string }
 interface FakePane {
+  /** herdr's scroll.max_offset_from_bottom; undefined leaves `scroll` out of the view. */
+  maxOffset?: number;
   pane_id: string;
   tab_id: string;
   workspace_id: string;
@@ -237,7 +239,7 @@ class FakeHerdr {
   }
 
   private paneView(p: FakePane): Record<string, unknown> {
-    return { pane_id: p.pane_id, tab_id: p.tab_id, workspace_id: p.workspace_id, terminal_id: p.terminal_id, cwd: p.cwd, focused: p.pane_id === this.focused, revision: p.revision, ...(p.tokens ? { tokens: { ...p.tokens } } : {}) };
+    return { pane_id: p.pane_id, tab_id: p.tab_id, workspace_id: p.workspace_id, terminal_id: p.terminal_id, cwd: p.cwd, focused: p.pane_id === this.focused, revision: p.revision, ...(p.tokens ? { tokens: { ...p.tokens } } : {}), ...(p.maxOffset !== undefined ? { scroll: { max_offset_from_bottom: p.maxOffset } } : {}) };
   }
 
   rpc: HerdrSocketRpc = async (req) => {
@@ -822,6 +824,19 @@ describe("capture", () => {
     h.fake.rect = null; // 40 default rows
     await h.adapter.capturePaneContent("cap@r");
     expect(h.fake.callsOf("pane.read").at(-1)).toMatchObject({ lines: 60 });
+  });
+
+  it("a pane with no scrollback (a fullscreen app) is read from its screen, never its history", async () => {
+    const pane = await create("full@r");
+    pane.maxOffset = 0;
+    await h.adapter.capturePaneContent("full@r", 50);
+    expect(h.fake.callsOf("pane.read").at(-1)).toMatchObject({ pane_id: pane.pane_id, source: "visible" });
+    expect(h.fake.callsOf("pane.read").at(-1)).not.toHaveProperty("lines");
+    await h.adapter.capturePaneHistory(PANE_ID(pane.terminal_id));
+    expect(h.fake.callsOf("pane.read").at(-1)).toMatchObject({ source: "visible" });
+    pane.maxOffset = 12;
+    await h.adapter.capturePaneContent("full@r", 50);
+    expect(h.fake.callsOf("pane.read").at(-1)).toMatchObject({ source: "recent" });
   });
 
   it("escapeSequences reads ansi; joinWrappedLines reads unwrapped", async () => {
