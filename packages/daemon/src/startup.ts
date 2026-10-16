@@ -508,7 +508,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   setDaemonTerminalBackend(terminalBackend.kind);
   const herdrMux = terminalBackend.kind === "herdr"
     ? new HerdrMux({ fallbackExec: execCommand, herdrSession: terminalBackend.herdrSession, socketPath: terminalBackend.socketPath,
-      statePath: dbPath === ":memory:" ? undefined : nodePath.join(OPENRIG_HOME, "herdr-backend.json") })
+      statePath: dbPath === ":memory:" ? undefined : nodePath.join(OPENRIG_HOME, "herdr-backend.json"),
+      layoutPath: nodePath.join(OPENRIG_HOME, "herdr-layout.json") })
     : null;
   const tmuxAdapter = herdrMux
     ? new TmuxAdapter(herdrMux.exec, undefined, herdrMux.argvExec)

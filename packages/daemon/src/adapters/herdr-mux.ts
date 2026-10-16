@@ -53,6 +53,8 @@ export interface HerdrMuxOptions {
   herdrBin?: string;
   /** Persisted session environment/options. Omit to keep state in memory only. */
   statePath?: string;
+  /** Where seats go: a JSON {@link HerdrLayoutFile}. Read on every use, so edits apply to the next seat. */
+  layoutPath?: string;
   /** Runs commands that are not tmux commands (the adapter's `kill -SIG pid`). */
   fallbackExec: ExecFn;
   /** Start a herdr server when none answers (startServer). */
@@ -103,6 +105,14 @@ interface SessionState {
   options: Record<string, string>;
   paneOptions: Record<string, string>;
 }
+/** One tab of a layout: seats in rows, left to right, top to bottom. Cells share each row (and rows the tab) equally. */
+export interface HerdrLayoutTab { label: string; rows: string[][] }
+export interface HerdrLayoutWorkspace { label: string; tabs: HerdrLayoutTab[] }
+/** `herdr-layout.json`: which herdr workspace and tab each seat (by session name) lives in, and where. */
+export interface HerdrLayoutFile { workspaces: HerdrLayoutWorkspace[] }
+interface LayoutSlot { workspace: string; tab: HerdrLayoutTab }
+interface LayoutTreeNode { type: "pane" | "split"; pane_id?: string; direction?: string; ratio?: number; first?: LayoutTreeNode; second?: LayoutTreeNode }
+
 interface MuxState { sessions: Record<string, SessionState>; serverOptions: Record<string, string> }
 
 /** One OpenRig session as herdr shows it: the tab and its panes, root first. */
@@ -257,6 +267,7 @@ export class HerdrMux {
   /** shell pid -> terminal id, from process reads: lets a `kill` aimed at a held pane's shell find its pane. */
   private readonly shellPids = new Map<number, string>();
   private readonly pipes = new Map<string, ChildProcess>();
+  private readonly arrangeTimers = new Map<string, NodeJS.Timeout>();
   private createLock: Promise<unknown> = Promise.resolve();
   private counter = 0;
 
@@ -425,7 +436,8 @@ export class HerdrMux {
         this.state.sessions[root.terminal_id] = state;
         stateChanged = true;
       }
-      const panes = [root, ...snap.panes.filter((p) => p.tab_id === root.tab_id && p.pane_id !== root.pane_id)];
+      // A seat is its one pane; other panes sharing its tab are other seats (a layout) or the person's own.
+      const panes = [root];
       out.push({ name, id: herdrTerminalNumber(root.terminal_id), root, panes, tab: snap.tabs.find((t) => t.tab_id === root.tab_id), state });
     }
     // Forget sessions whose terminals are gone.
@@ -558,7 +570,7 @@ export class HerdrMux {
     const run = async (): Promise<Resolved> => {
       const snap = await this.snapshot();
       if (this.sessions(snap).some((s) => s.name === name)) throw new MuxError(`duplicate session: ${name}`);
-      const label = herdrWorkspaceLabel(name);
+      const label = this.layoutSlot(name)?.workspace ?? herdrWorkspaceLabel(name);
       const workspace = snap.workspaces.find((w) => w.label === label);
       let root: HerdrPane;
       let undo: () => Promise<unknown>;
@@ -591,6 +603,7 @@ export class HerdrMux {
     const next = this.createLock.then(run, run);
     this.createLock = next.catch(() => undefined);
     const resolved = await next;
+    this.scheduleArrange(name);
     const command = p.positionals.join(" ");
     if (command) await this.typeScript(resolved.pane, command, { cwd, env: {}, inShell: false });
     return p.bools.has("P") ? `${await this.render(flag(p, "F") ?? "#{session_name}:", resolved, undefined)}\n` : "";
@@ -599,10 +612,10 @@ export class HerdrMux {
   private async killSession(p: ParsedArgs): Promise<string> {
     const { session } = await this.resolve(flag(p, "t") ?? "", "session");
     this.stopPipe(session.root.terminal_id);
-    if (session.tab) await this.request("tab.close", { tab_id: session.tab.tab_id });
-    else await this.request("pane.close", { pane_id: session.root.pane_id });
+    await this.request("pane.close", { pane_id: session.root.pane_id });
     delete this.state.sessions[session.root.terminal_id];
     this.saveState();
+    this.scheduleArrange(session.name);
     return "";
   }
 
@@ -917,6 +930,127 @@ export class HerdrMux {
   /** Stop every pipe this mux started (daemon shutdown). */
   close(): void {
     for (const id of [...this.pipes.keys()]) this.stopPipe(id);
+    for (const timer of this.arrangeTimers.values()) clearTimeout(timer);
+    this.arrangeTimers.clear();
+  }
+
+  // ---------------------------------------------------------------- layouts
+
+  private loadLayout(): HerdrLayoutFile | null {
+    if (!this.opts.layoutPath) return null;
+    try {
+      const parsed = JSON.parse(readFileSync(this.opts.layoutPath, "utf8")) as Partial<HerdrLayoutFile>;
+      return Array.isArray(parsed.workspaces) ? { workspaces: parsed.workspaces } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private layoutSlot(session: string): LayoutSlot | null {
+    for (const workspace of this.loadLayout()?.workspaces ?? []) {
+      for (const tab of workspace.tabs ?? []) {
+        if ((tab.rows ?? []).some((row) => row.includes(session))) return { workspace: workspace.label, tab };
+      }
+    }
+    return null;
+  }
+
+  /** Arrange a seat's layout tab once its neighbours have settled (a `rig up` starts seats in a burst). */
+  private scheduleArrange(session: string): void {
+    const slot = this.layoutSlot(session);
+    if (!slot) return;
+    const key = `${slot.workspace}\u0000${slot.tab.label}`;
+    clearTimeout(this.arrangeTimers.get(key));
+    const timer = setTimeout(() => {
+      this.arrangeTimers.delete(key);
+      const run = () => this.arrangeTab(slot.workspace, slot.tab).catch((err: unknown) => {
+        if (process.env.OPENRIG_HERDR_DEBUG === "1") process.stderr.write(`herdr layout ${slot.workspace}/${slot.tab.label}: ${err instanceof Error ? err.message : String(err)}\n`);
+      });
+      this.createLock = this.createLock.then(run, run);
+    }, 400);
+    timer.unref?.();
+    this.arrangeTimers.set(key, timer);
+  }
+
+  /** Arrange every layout tab now. Resolves once done; a failure leaves the panes where they are. */
+  async arrangeAll(): Promise<void> {
+    for (const workspace of this.loadLayout()?.workspaces ?? []) {
+      for (const tab of workspace.tabs ?? []) await this.arrangeTab(workspace.label, tab);
+    }
+  }
+
+  private async move(paneId: string, destination: Record<string, unknown>): Promise<HerdrPane> {
+    const result = await this.request("pane.move", { pane_id: paneId, destination, focus: false });
+    return ((result["move_result"] as { pane?: HerdrPane } | undefined)?.pane) ?? (result["pane"] as HerdrPane);
+  }
+
+  /**
+   * Put the layout tab's live seats in its grid. Moving a pane keeps its terminal, process and scrollback, so the
+   * tab is rebuilt whenever its seats or their order differ, then every split is made equal.
+   */
+  private async arrangeTab(workspaceLabel: string, tab: HerdrLayoutTab): Promise<void> {
+    const snap = await this.snapshot();
+    const workspace = snap.workspaces.find((w) => w.label === workspaceLabel);
+    if (!workspace) return;
+    const roots = new Map(this.sessions(snap).map((s) => [s.name, s.root] as const));
+    const grid = (tab.rows ?? []).map((row) => row.map((n) => roots.get(n)).filter((p): p is HerdrPane => !!p)).filter((row) => row.length > 0);
+    if (grid.length === 0) return;
+    const wanted = grid.flat();
+    const tabId = wanted[0]!.tab_id;
+    const tabPanes = snap.panes.filter((p) => p.tab_id === tabId);
+    const label = snap.tabs.find((t) => t.tab_id === tabId)?.label;
+    let target = tabId;
+    if (!(label === tab.label && tabPanes.length === wanted.length && wanted.every((p) => p.tab_id === tabId) && this.inGridOrder(snap, tabId, grid))) {
+      const firsts: HerdrPane[] = [await this.move(grid[0]![0]!.pane_id, { type: "new_tab", workspace_id: workspace.workspace_id, label: tab.label })];
+      target = firsts[0]!.tab_id;
+      // Each row's first seat goes below the previous row's while the rows are still single panes, so every row
+      // spans the tab's full width; then the rows fill rightwards.
+      for (let r = 1; r < grid.length; r++) {
+        firsts.push(await this.move(grid[r]![0]!.pane_id, { type: "tab", tab_id: target, split: "down", target_pane_id: firsts[r - 1]!.pane_id }));
+      }
+      for (let r = 0; r < grid.length; r++) {
+        let previous = firsts[r]!;
+        for (let c = 1; c < grid[r]!.length; c++) {
+          previous = await this.move(grid[r]![c]!.pane_id, { type: "tab", tab_id: target, split: "right", target_pane_id: previous.pane_id });
+        }
+      }
+    }
+    await this.equalize(target);
+  }
+
+  /** Whether the tab's panes already sit in the grid's rows and columns. */
+  private inGridOrder(snap: HerdrSnapshot, tabId: string, grid: HerdrPane[][]): boolean {
+    const rects = new Map((snap.layouts.find((l) => l.tab_id === tabId)?.panes ?? []).map((p) => [p.pane_id, p.rect as { x?: number; y?: number } | undefined] as const));
+    let lastY = -1;
+    for (const row of grid) {
+      const ys = row.map((p) => rects.get(p.pane_id)?.y);
+      if (ys.some((y) => y === undefined) || new Set(ys).size !== 1 || ys[0]! <= lastY) return false;
+      lastY = ys[0]!;
+      const xs = row.map((p) => rects.get(p.pane_id)?.x ?? -1);
+      if (xs.some((x, i) => i > 0 && x <= xs[i - 1]!)) return false;
+    }
+    return true;
+  }
+
+  /** Give every pane in the tab an equal share: each split's ratio is its first side's share of rows or columns. */
+  private async equalize(tabId: string): Promise<void> {
+    const exported = await this.request("layout.export", { tab_id: tabId });
+    const root = ((exported["layout"] as { root?: LayoutTreeNode } | undefined)?.root);
+    if (!root) return;
+    const count = (node: LayoutTreeNode | undefined, axis: "right" | "down"): number => {
+      if (!node || node.type === "pane") return 1;
+      const a = count(node.first, axis), b = count(node.second, axis);
+      return node.direction === axis ? a + b : Math.max(a, b);
+    };
+    const walk = async (node: LayoutTreeNode | undefined, path: boolean[]): Promise<void> => {
+      if (!node || node.type !== "split") return;
+      const axis = node.direction === "down" ? "down" : "right";
+      const ratio = count(node.first, axis) / count(node, axis);
+      if (Math.abs((node.ratio ?? 0) - ratio) > 0.005) await this.request("layout.set_split_ratio", { tab_id: tabId, path, ratio });
+      await walk(node.first, [...path, false]);
+      await walk(node.second, [...path, true]);
+    };
+    await walk(root, []);
   }
 
   // ---------------------------------------------------------------- state file
