@@ -26,11 +26,12 @@ import { EventBus } from "./domain/event-bus.js";
 import { NodeLauncher } from "./domain/node-launcher.js";
 import { TmuxOptionDefaultsApplier } from "./domain/tmux-option-defaults.js";
 import { TmuxAdapter } from "./adapters/tmux.js";
-import { setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
+import { setDaemonTerminalBackend, setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
 import { HerdrMux } from "./adapters/herdr-mux.js";
-import { resolveTerminalBackend } from "./adapters/terminal-backend.js";
+import { createHerdrSocketRpc, createHerdrSocketTransport } from "./domain/terminal/herdr-transport.js";
+import { herdrBackendSocketPath, resolveTerminalBackend, type TerminalBackend } from "./adapters/terminal-backend.js";
 import { boundedProbeExec } from "./adapters/bounded-probe-exec.js";
 import { execPreflightCommand } from "./adapters/preflight-exec.js";
 import { createCmuxCliTransport } from "./adapters/cmux-transport.js";
@@ -494,9 +495,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // An injected string exec keeps the shell path, so its fake sees every command. OPENRIG_TMUX_SHELL=1 keeps it too.
   const argvExec = opts?.argvExec
     ?? (opts?.tmuxExec || (process.env.OPENRIG_TMUX_SHELL === "1" && process.platform !== "win32") ? undefined : execArgvCommand);
-  // OPENRIG_TERMINAL_BACKEND=herdr runs every seat as a herdr pane: the adapter's tmux commands are answered by
-  // herdr's control socket and no tmux server is used. An injected exec (tests) always keeps the tmux path.
-  const terminalBackend = opts?.tmuxExec || opts?.argvExec ? { kind: "tmux" as const } : resolveTerminalBackend(process.env);
+  // terminal.backend=herdr (OPENRIG_TERMINAL_BACKEND overrides, as for every setting) runs every seat as a herdr
+  // pane: the adapter's tmux commands are answered by herdr's control socket and no tmux server is used. An
+  // injected exec (tests) always keeps the tmux path.
+  const terminalBackend: TerminalBackend = opts?.tmuxExec || opts?.argvExec ? { kind: "tmux" } : (() => {
+    const settings = new ContextPackSettingsStore();
+    return resolveTerminalBackend(process.env, {
+      backend: settings.resolveOne("terminal.backend").value,
+      herdrSession: settings.resolveOne("terminal.herdr_session").value,
+    });
+  })();
+  setDaemonTerminalBackend(terminalBackend.kind);
   const herdrMux = terminalBackend.kind === "herdr"
     ? new HerdrMux({ fallbackExec: execCommand, herdrSession: terminalBackend.herdrSession, socketPath: terminalBackend.socketPath,
       statePath: dbPath === ":memory:" ? undefined : nodePath.join(OPENRIG_HOME, "herdr-backend.json") })
@@ -778,7 +787,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const exec = opts?.tmuxExec ?? execCommand;
   // Runtime --version/--help probes are bounded and end their process group: startup awaits the Codex probe
   // before it listens (fresh DB), so a hung binary must not hold it. An injected test exec keeps probing as given.
-  const runtimeVerifier = new RuntimeVerifier({ exec, db, ...(opts?.tmuxExec ? {} : { probeExec: boundedProbeExec() }) });
+  const runtimeVerifier = new RuntimeVerifier({
+    exec, db, ...(opts?.tmuxExec ? {} : { probeExec: boundedProbeExec() }),
+    ...(terminalBackend.kind === "herdr" ? {
+      terminalBackend: "herdr" as const,
+      probeHerdrSocket: async () => (await createHerdrSocketTransport(createHerdrSocketRpc(herdrBackendSocketPath(terminalBackend, process.env), 2000))().probe()).alive,
+    } : {}),
+  });
   const probeRegistry = new RequirementsProbeRegistry(exec);
   const externalInstallPlanner = new ExternalInstallPlanner();
   const externalInstallExecutor = new ExternalInstallExecutor({ exec, db });
@@ -1897,11 +1912,14 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       logicalId: e.logicalId,
     });
 
-    const herdrSocketPath = resolveHerdrSocketPath();
+    // With the herdr backend, views open in the herdr server the seats run on.
+    const herdrSocketPath = terminalBackend.kind === "herdr" ? herdrBackendSocketPath(terminalBackend, process.env) : resolveHerdrSocketPath();
+    const herdrViewSession = terminalBackend.kind === "herdr" && (terminalBackend.herdrSession || terminalBackend.socketPath)
+      ? terminalBackend.herdrSession : process.env["HERDR_SESSION"];
     const herdrProvider = new HerdrAdapter({
       // FB4: herdr speaks its unix control socket (there is no `layout` CLI).
       transportFactory: createHerdrSocketTransport(createHerdrSocketRpc(herdrSocketPath)),
-      launch: { socketPath: herdrSocketPath, ...(process.env["HERDR_SESSION"] ? { session: process.env["HERDR_SESSION"] } : {}) },
+      launch: { socketPath: herdrSocketPath, ...(herdrViewSession ? { session: herdrViewSession } : {}) },
     });
     const cmuxProvider = new CmuxProviderAdapter({
       cmuxAdapter,
@@ -2540,6 +2558,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.routeTimingRecorder = routeTimingRecorder;
   // S20 — bind provenance rides the health surface (absent = legacy healthz body).
   deps.bindPlan = opts?.bindPlan;
+  deps.terminalBackend = terminalBackend.kind === "herdr"
+    ? { kind: "herdr", ...(terminalBackend.herdrSession ? { herdrSession: terminalBackend.herdrSession } : {}) }
+    : { kind: "tmux" };
 
   // Hermeticity (hotfix qitem-20260822230440-da0d2ad6 FIX 2): the REAL daemon
   // constructs the drift observer here with an eagerly-warmed mode cache — the

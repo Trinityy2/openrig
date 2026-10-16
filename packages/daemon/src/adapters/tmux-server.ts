@@ -7,6 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { herdrAttachCommand } from "./terminal-backend.js";
 
 function realpath(p: string): string {
   try {
@@ -56,8 +57,25 @@ function shellWord(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replace(/'/g, "'\"'\"'") + "'";
 }
 
-/** `tmux attach -t <session>`, with the daemon's server flags when it isn't on the default server. */
+let daemonBackend: "tmux" | "herdr" = "tmux";
+
+/** Recorded once at daemon startup: which multiplexer runs the seats. */
+export function setDaemonTerminalBackend(kind: "tmux" | "herdr"): void {
+  daemonBackend = kind;
+}
+
+/** The multiplexer the daemon's seats run on. */
+export function daemonTerminalBackend(): "tmux" | "herdr" {
+  return daemonBackend;
+}
+
+/**
+ * The command a person runs to reach a seat: `tmux attach -t <session>`, with the daemon's server flags when it
+ * isn't on the default server. With the herdr backend there is no tmux session: `rig attach <session>` brings
+ * the person to the seat's herdr pane instead (the field names that carry this string are unchanged).
+ */
 export function tmuxAttachCommand(session: string): string {
+  if (daemonBackend === "herdr") return herdrAttachCommand(session);
   const server = daemonServerArgs.map((arg, i) => (i % 2 === 0 ? arg : shellWord(arg))).join(" ");
   return `tmux${server ? ` ${server}` : ""} attach -t ${session}`;
 }

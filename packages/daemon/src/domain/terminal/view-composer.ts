@@ -74,6 +74,11 @@ export interface ComposeContext {
    * default. Absent or empty → no flags, unchanged. Never put into an ssh remote command.
    */
   localTmuxServer?: readonly string[];
+  /**
+   * The LOCAL pane command for a seat when the daemon's seats don't run on tmux (the herdr backend). Absent →
+   * the tmux attach command, unchanged. Never used for an ssh remote command: that host attaches its own way.
+   */
+  localAttachCommand?: (session: string, readOnly: boolean) => string;
 }
 
 /** POSIX single-quote a string so session names / targets are shell-inert in the composed command. */
@@ -198,7 +203,9 @@ export function composeView(
       seat: m.seat,
       ...(m.runtime ? { runtime: m.runtime } : {}),
       label: m.label,
-      paneCommand: `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+      paneCommand: ctx.localAttachCommand
+        ? ctx.localAttachCommand(m.tmuxSession, m.readOnly)
+        : `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
       readOnly: m.readOnly,
     });
   }

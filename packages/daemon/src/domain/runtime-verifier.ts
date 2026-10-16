@@ -10,6 +10,10 @@ interface RuntimeVerifierDeps {
   /** Runs the `--version` / `--help` probes (default: exec). The daemon passes boundedProbeExec, so a hung
    *  runtime binary is ended after a bound instead of holding up startup or bootstrap. */
   probeExec?: ExecFn;
+  /** The multiplexer that runs the seats. With "herdr", the terminal check verifies herdr, not tmux. */
+  terminalBackend?: "tmux" | "herdr";
+  /** Whether the herdr backend's control socket answers (herdr backend only). */
+  probeHerdrSocket?: () => Promise<boolean>;
 }
 
 /** What a probe that didn't answer within its bound records: status "error" with what happened. The binary
@@ -46,11 +50,42 @@ export class RuntimeVerifier {
   readonly db: Database.Database;
   private exec: ExecFn;
   private probeExec: ExecFn;
+  private terminalBackend: "tmux" | "herdr";
+  private probeHerdrSocket?: () => Promise<boolean>;
 
   constructor(deps: RuntimeVerifierDeps) {
     this.db = deps.db;
     this.exec = deps.exec;
     this.probeExec = deps.probeExec ?? deps.exec;
+    this.terminalBackend = deps.terminalBackend ?? "tmux";
+    this.probeHerdrSocket = deps.probeHerdrSocket;
+  }
+
+  /**
+   * Verify herdr (the herdr terminal backend): `herdr --version`, then whether its control socket answers. A
+   * socket that doesn't answer yet is "degraded", not a failure: the daemon starts the herdr server when it
+   * creates the first seat, as tmux starts its server.
+   */
+  async verifyHerdr(): Promise<RuntimeVerification> {
+    const result = await this.runProbe("herdr", async () => {
+      const output = await this.probeExec("herdr --version");
+      const version = this.parseVersion(output);
+      if (!version) {
+        return { status: "error" as RuntimeStatus, version: null, capabilitiesJson: null, error: "unparseable version output" };
+      }
+      let reachable: boolean | null = null;
+      try {
+        reachable = this.probeHerdrSocket ? await this.probeHerdrSocket() : null;
+      } catch {
+        reachable = false;
+      }
+      if (reachable === false) {
+        return { status: "degraded" as RuntimeStatus, version, capabilitiesJson: null, error: "herdr control socket is not answering; the daemon starts the herdr server with the first seat" };
+      }
+      return { status: "verified" as RuntimeStatus, version, capabilitiesJson: null, error: null };
+    });
+    this.persist(result);
+    return result;
   }
 
   /** Verify tmux: `tmux -V`, parse version from output. */
@@ -139,7 +174,9 @@ export class RuntimeVerifier {
     const results: RuntimeVerification[] = [];
     for (const runtime of runtimes) {
       switch (runtime) {
-        case "tmux": results.push(await this.verifyTmux()); break;
+        // The terminal requirement follows the backend: the herdr backend needs herdr, not tmux.
+        case "tmux": results.push(this.terminalBackend === "herdr" ? await this.verifyHerdr() : await this.verifyTmux()); break;
+        case "herdr": results.push(await this.verifyHerdr()); break;
         case "cmux": results.push(await this.verifyCmux()); break;
         case "claude-code": results.push(await this.verifyClaude()); break;
         case "codex": results.push(await this.verifyCodex()); break;

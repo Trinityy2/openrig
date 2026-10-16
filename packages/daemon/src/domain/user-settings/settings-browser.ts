@@ -97,6 +97,7 @@ function application(key: string): string {
   if (key === "retention.enabled") return "Selected at daemon startup; running sweeper unverified.";
   if (key.startsWith("retention.")) return "Read on the retention sweep; last applied value unverified.";
   if (key.startsWith("policies.claude_compaction.")) return "Read by the compaction policy consumer; running action unverified.";
+  if (key === "terminal.backend" || key === "terminal.herdr_session") return "Selected at daemon startup and by the CLI's terminal calls; running backend unverified.";
   if (key === "terminal.status_bar" || key.startsWith("runtime.")) return "Future launch behavior; existing sessions not verified.";
   return "Resolved configuration; running application unverified.";
 }

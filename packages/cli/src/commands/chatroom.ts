@@ -5,6 +5,26 @@ import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-life
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 import { execSync } from "node:child_process";
+import { cliTerminalBackend, defaultHerdrExec, herdrShellCommand, type HerdrExecFn, type TerminalBackend } from "../terminal-backend.js";
+
+/**
+ * herdr backend: run `rig chatroom watch <rig>` in a new herdr workspace labelled `chatroom@<rig>` (the herdr form of
+ * the dedicated tmux session). Returns the lines to print; throws when herdr refuses.
+ */
+export function startHerdrChatroomWatch(rig: string, backend: TerminalBackend, herdrExec: HerdrExecFn = defaultHerdrExec(backend)): string[] {
+  const label = `chatroom@${rig}`;
+  const created = JSON.parse(herdrExec(["workspace", "create", "--label", label, "--no-focus"])) as {
+    result?: { root_pane?: { pane_id?: string }; workspace?: { workspace_id?: string } };
+  };
+  const paneId = created.result?.root_pane?.pane_id;
+  const workspaceId = created.result?.workspace?.workspace_id;
+  if (!paneId || !workspaceId) throw new Error("herdr did not report the new workspace");
+  herdrExec(["pane", "run", paneId, `rig chatroom watch ${JSON.stringify(rig)}`]);
+  return [
+    `Started watch in herdr workspace: ${label}`,
+    `Show it with: ${herdrShellCommand(backend, ["workspace", "focus", workspaceId])}`,
+  ];
+}
 
 interface RigSummary {
   id: string;
@@ -155,7 +175,7 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
   cmd
     .command("watch")
     .argument("<rig>", "Rig name")
-    .option("--tmux", "Run watch in a dedicated tmux session")
+    .option("--tmux", "Run watch in a dedicated tmux session (a herdr workspace with terminal.backend herdr)")
     .action(async (rig: string, opts: { tmux?: boolean }) => {
       const client = await getClient();
       if (!client) return;
@@ -171,6 +191,16 @@ export function chatroomCommand(depsOverride?: StatusDeps): Command {
 
       if (opts.tmux) {
         const sessionName = `chatroom@${rig}`;
+        const backend = cliTerminalBackend();
+        if (backend.kind === "herdr") {
+          try {
+            for (const line of startHerdrChatroomWatch(rig, backend)) console.log(line);
+          } catch (err) {
+            console.error(`Failed to create herdr workspace '${sessionName}': ${(err as Error).message}`);
+            process.exitCode = 1;
+          }
+          return;
+        }
         try {
           execSync(`tmux new-session -d -s ${JSON.stringify(sessionName)} "rig chatroom watch ${JSON.stringify(rig)}"`, { stdio: "ignore" });
           console.log(`Started watch in tmux session: ${sessionName}`);

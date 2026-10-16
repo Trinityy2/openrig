@@ -81,6 +81,10 @@
     "./local-reading": {
       "types": "./dist/local-reading-surface.d.ts",
       "import": "./dist/local-reading-surface.js"
+    },
+    "./terminal-backend": {
+      "types": "./dist/terminal-backend-surface.d.ts",
+      "import": "./dist/terminal-backend-surface.js"
     }
   },
   "scripts": {
