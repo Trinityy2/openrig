@@ -29,6 +29,8 @@ import { TmuxAdapter } from "./adapters/tmux.js";
 import { setDaemonTmuxServer, tmuxServerArgs } from "./adapters/tmux-server.js";
 import { CmuxAdapter } from "./adapters/cmux.js";
 import { execArgvCommand, execCommand } from "./adapters/tmux-exec.js";
+import { HerdrMux } from "./adapters/herdr-mux.js";
+import { resolveTerminalBackend } from "./adapters/terminal-backend.js";
 import { boundedProbeExec } from "./adapters/bounded-probe-exec.js";
 import { execPreflightCommand } from "./adapters/preflight-exec.js";
 import { createCmuxCliTransport } from "./adapters/cmux-transport.js";
@@ -492,10 +494,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // An injected string exec keeps the shell path, so its fake sees every command. OPENRIG_TMUX_SHELL=1 keeps it too.
   const argvExec = opts?.argvExec
     ?? (opts?.tmuxExec || (process.env.OPENRIG_TMUX_SHELL === "1" && process.platform !== "win32") ? undefined : execArgvCommand);
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
+  // OPENRIG_TERMINAL_BACKEND=herdr runs every seat as a herdr pane: the adapter's tmux commands are answered by
+  // herdr's control socket and no tmux server is used. An injected exec (tests) always keeps the tmux path.
+  const terminalBackend = opts?.tmuxExec || opts?.argvExec ? { kind: "tmux" as const } : resolveTerminalBackend(process.env);
+  const herdrMux = terminalBackend.kind === "herdr"
+    ? new HerdrMux({ fallbackExec: execCommand, herdrSession: terminalBackend.herdrSession, socketPath: terminalBackend.socketPath,
+      statePath: dbPath === ":memory:" ? undefined : nodePath.join(OPENRIG_HOME, "herdr-backend.json") })
+    : null;
+  const tmuxAdapter = herdrMux
+    ? new TmuxAdapter(herdrMux.exec, undefined, herdrMux.argvExec)
+    : new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
   // The real tmux runs with this process's environment, so its server is the one $TMUX names.
   // An injected exec has no server of its own: printed attach commands stay in the default form.
-  setDaemonTmuxServer(opts?.tmuxExec ? [] : tmuxServerArgs(process.env));
+  setDaemonTmuxServer(opts?.tmuxExec || herdrMux ? [] : tmuxServerArgs(process.env));
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;

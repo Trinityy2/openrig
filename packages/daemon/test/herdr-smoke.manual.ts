@@ -1,0 +1,53 @@
+// Manual live smoke: OPENRIG_HERDR_SESSION=<isolated herdr session> npx tsx test/herdr-smoke.manual.ts
+import { TmuxAdapter } from "../src/adapters/tmux.js";
+import { HerdrMux } from "../src/adapters/herdr-mux.js";
+import { execCommand } from "../src/adapters/tmux-exec.js";
+
+const session = process.env.OPENRIG_HERDR_SESSION;
+if (!session) throw new Error("set OPENRIG_HERDR_SESSION to an isolated herdr session");
+const mux = new HerdrMux({ fallbackExec: execCommand, herdrSession: session });
+const t = new TmuxAdapter(mux.exec, undefined, mux.argvExec);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const name = `dev-impl@smoke${Date.now() % 10000}`;
+const step = (label: string, v: unknown) => console.log(`${label}:`, JSON.stringify(v));
+
+step("startServer", await t.startServer());
+step("createSession", await t.createSession(name, "/tmp", { OPENRIG_NODE_ID: "n1", FOO: "bar" }));
+step("probe", await t.probeSession(name));
+step("probe-missing", await t.probeSession("nope@x"));
+step("sessions", (await t.listSessions()).map((s) => s.name));
+const panes = await t.listPanes(name);
+step("panes", panes);
+const pane = panes[0]!.id;
+step("pid", await t.getPanePid(pane));
+step("cmd", await t.getPaneCommand(pane));
+await sleep(800);
+step("sendShell", await t.sendShellCommand(name, "echo MARK-$FOO-$((40+2))"));
+await sleep(800);
+step("capture", (await t.capturePaneContent(name, 10))?.includes("MARK-bar-42"));
+step("sendText", await t.sendText(name, "echo line1\necho line2"));
+step("enter", await t.sendKeys(name, ["Enter"]));
+await sleep(800);
+const batch = await t.capturePanesContent([name, "nope@x"], 10);
+step("batch", [...(batch?.entries() ?? [])].map(([k, v]) => [k, v.text?.includes("line2") ?? null, v.missing ?? false]));
+step("setOpt", await t.setSessionOption(name, "@rigged_node_id", "n1"));
+step("getOpt", await t.getSessionOption(name, "@rigged_node_id"));
+await t.setSessionEnv(name, "BAR", "baz");
+step("env", [await t.getSessionEnv(name, "BAR"), await t.getSessionEnv(name, "FOO"), await t.hasSessionEnv(name, "BAR")]);
+step("activity", [...(await t.readAllSessionWindowActivity() ?? new Map())]);
+step("procs", [...(await t.readAllPaneProcesses() ?? new Map())]);
+// cutover: hold, run a long job, signal pane root, pane goes "dead" with the shell back, respawn a command
+await t.sendShellCommand(name, "sleep 300");
+await sleep(600);
+step("cmd-sleep", await t.getPaneCommand(pane));
+step("remain", await t.setRemainOnExit(pane, true));
+step("remainRead", await t.getPaneLocalOption(pane, "remain-on-exit"));
+step("dead-before", await t.isPaneDead(pane));
+step("signal", await t.signalPaneProcess(pane, "TERM"));
+await sleep(600);
+step("dead-after", await t.isPaneDead(pane));
+step("respawn", await t.respawnPane(pane, "echo RESPAWNED-$BAR", { cwd: "/tmp", env: { BAR: "q" } }));
+await sleep(800);
+step("respawned", (await t.capturePaneHistory(pane))?.includes("RESPAWNED-q"));
+step("kill", await t.killSession(name));
+step("probe-after-kill", await t.probeSession(name));
