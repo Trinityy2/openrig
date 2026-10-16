@@ -1,0 +1,42 @@
+# OpenRig for herdr: run an OpenRig daemon whose seats are herdr panes, and reach it from herdr.
+#
+# The daemon does the work (rigs, queue, delivery, recovery); this plugin only starts it on this herdr server and
+# adds herdr-side entry points. Seats appear as tabs of a workspace named after their rig.
+
+id = "openrig.herdr"
+name = "OpenRig"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Run OpenRig agent rigs natively on herdr: seats are herdr panes, no tmux."
+platforms = ["linux", "macos"]
+
+# Starts the OpenRig daemon on this herdr server when it is not already running (see README: autostart).
+[[startup]]
+command = ["sh", "bin/openrig-herdr.sh", "startup"]
+
+[[panes]]
+id = "dashboard"
+title = "OpenRig"
+placement = "tab"
+command = ["sh", "bin/openrig-herdr.sh", "tui"]
+
+[[actions]]
+id = "dashboard"
+title = "OpenRig: open dashboard"
+description = "Open the OpenRig TUI in its own tab"
+command = ["herdr", "plugin", "pane", "open", "openrig.herdr", "dashboard"]
+
+[[actions]]
+id = "web"
+title = "OpenRig: open web UI"
+command = ["sh", "bin/openrig-herdr.sh", "web"]
+
+[[actions]]
+id = "start"
+title = "OpenRig: start daemon on herdr"
+command = ["sh", "bin/openrig-herdr.sh", "start"]
+
+[[actions]]
+id = "stop"
+title = "OpenRig: stop daemon"
+command = ["sh", "bin/openrig-herdr.sh", "stop"]
