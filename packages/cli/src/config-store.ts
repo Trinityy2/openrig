@@ -166,6 +166,8 @@ export interface RiggedConfig {
     backend: string;
     /** The named herdr session (`herdr --session NAME`); "" = herdr's own default. */
     herdrSession: string;
+    /** Claude seats (session names, comma-separated) that keep the fullscreen renderer; "" = none. */
+    claudeFullscreenSeats: string;
   };
   // Slice 15 (OPR.0.7.0.15) — the ONE switch for compact command-output
   // defaults (default off: today's output). Read by the CLI only; the daemon
@@ -341,6 +343,7 @@ const DEFAULTS = {
     statusBar: false,
     backend: "tmux",
     herdrSession: "",
+    claudeFullscreenSeats: "",
   },
   // Slice 15 — compact command-output defaults OFF until the switch is on.
   output: {
@@ -475,6 +478,7 @@ export const VALID_KEYS = [
   "terminal.status_bar",
   "terminal.backend",
   "terminal.herdr_session",
+  "terminal.claude_fullscreen_seats",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
   "output.whoami_peers",
@@ -581,6 +585,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.backend": { primary: "OPENRIG_TERMINAL_BACKEND" },
   "terminal.herdr_session": { primary: "OPENRIG_HERDR_SESSION" },
+  "terminal.claude_fullscreen_seats": { primary: "OPENRIG_CLAUDE_FULLSCREEN_SEATS" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
@@ -668,6 +673,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.backend": ["terminal", "backend"],
   "terminal.herdr_session": ["terminal", "herdrSession"],
+  "terminal.claude_fullscreen_seats": ["terminal", "claudeFullscreenSeats"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
@@ -1217,6 +1223,7 @@ export class ConfigStore {
         statusBar: v("terminal.status_bar") as boolean,
         backend: v("terminal.backend") as string,
         herdrSession: v("terminal.herdr_session") as string,
+        claudeFullscreenSeats: v("terminal.claude_fullscreen_seats") as string,
       },
       output: {
         compact: v("output.compact") as boolean,

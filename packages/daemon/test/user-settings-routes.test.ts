@@ -116,7 +116,8 @@ describe("config routes (User Settings v0)", () => {
     // + 1 usage.pi_openrouter_charge (slice 02 K4 OpenRouter charge beside the Pi estimate; default off).
     // + 1 transport.verify_input_box (input-box evidence for verified Claude Code and Codex sends; default off).
     // + 2 terminal.backend / terminal.herdr_session (seats on tmux or herdr; default tmux).
-    expect(Object.keys(body.settings).length).toBe(81);
+    // + 1 terminal.claude_fullscreen_seats (Claude seats kept in the fullscreen renderer; default none).
+    expect(Object.keys(body.settings).length).toBe(82);
     expect(body.settings["launch.non_interruptive"]).toMatchObject({ value: false, source: "default" });
     expect(body.settings["runtime.readiness_timeout_seconds"]).toMatchObject({ value: 30, source: "default" });
     expect(body.settings["ui.enabled"]).toMatchObject({ value: false, source: "default" });

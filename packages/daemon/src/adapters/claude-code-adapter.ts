@@ -263,7 +263,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const permissionMode = posture + operationalLaunchArg(this.runtime, binding);
     // OPR.0.5.3.1: classic-renderer env prefix (default on) → native scrollback for every
     // managed launch path (fresh/resume/fork). "" when overridden off → byte-identical command.
-    const rendererPrefix = claudeClassicRendererEnvPrefix(process.env);
+    const rendererPrefix = claudeClassicRendererEnvPrefix(process.env, binding.tmuxSession);
 
     // 51-07: a per-agent model declared in the spec (member.model ?? profile ?? defaults, resolved
     // onto binding.model at instantiate) is emitted as `--model <x>` on the launch command. Absent →

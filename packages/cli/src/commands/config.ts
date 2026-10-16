@@ -103,6 +103,7 @@ Keys:
   terminal.status_bar    show the inner tmux status bar on launch (default off)
   terminal.backend       the multiplexer that runs the seats: tmux or herdr (default tmux; read at daemon start)
   terminal.herdr_session with terminal.backend herdr, the named herdr session (herdr --session NAME; default: herdr's own)
+  terminal.claude_fullscreen_seats  Claude seats (comma-separated session names) launched in the fullscreen renderer, which takes mouse input; others launch classic for scrollback (default none)
   output.compact         short default output for queue writes, queue show, queue transitions and whoami peers; --full restores today's output (default off)
   output.whoami_peers    with output.compact on, how many peers rig whoami --json lists, edge peers first; --all-peers lists all (default 8)
   provider.usage_windows Codex and Claude usage windows in rig provider status (Codex read on request; Claude from its seats' status lines) (default off)

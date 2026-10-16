@@ -73,6 +73,7 @@ const LABELS: Record<string, string> = {
   "transport.verify_input_box": "Verify by input box (Claude Code, Codex)",
   "terminal.backend": "Terminal backend (tmux or herdr)",
   "terminal.herdr_session": "herdr session",
+  "terminal.claude_fullscreen_seats": "Claude fullscreen seats",
   "ui.enabled": "Web UI",
   "health.context_pressure.warning_percent": "Context warning threshold",
   "health.context_pressure.critical_percent": "Context critical threshold",

@@ -173,6 +173,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "terminal.status_bar",
       "terminal.backend",
       "terminal.herdr_session",
+      "terminal.claude_fullscreen_seats",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",
       // Slice 15 P5 — the whoami peer bound under output.compact.

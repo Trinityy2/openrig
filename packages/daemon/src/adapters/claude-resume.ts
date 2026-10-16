@@ -87,7 +87,7 @@ export class ClaudeResumeAdapter {
     const appliedLaunch = observeClaudePermission(posture);
     const permissionMode = posture + operationalLaunchArg("claude-code", choice);
     const cmd = managed ? managed.command(["--permission-mode", selectedPermissionMode!, ...operationalLaunchArgs("claude-code", choice), ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), "--resume", resumeToken!], claudeResumeLaunchEnv(resumeToken!))
-      : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env)}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(resumeToken!)}`;
+      : `${claudeResumeLaunchPrefix(resumeToken!)}${claudeClassicRendererEnvPrefix(process.env, tmuxSessionName)}claude ${permissionMode}${modelArg}${effortArg} --resume ${shellQuote(resumeToken!)}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(tmuxSessionName, cmd, managed.assertCurrent)
       : this.options.seatLaunchEnvironment

@@ -93,7 +93,7 @@ export class ClaudeManagedLaunch {
     return this.sessionEnv.CLAUDE_CONFIG_DIR ? this.configPaths(cwd).statePath : undefined;
   }
 
-  private context(cwd: string) {
+  private context(cwd: string, session?: string) {
     const { PATH, HOME, CLAUDE_CONFIG_DIR } = this.sessionEnv;
     if (!PATH || !HOME || !path.isAbsolute(HOME)) throw new Error("Claude managed launch context is unresolved: managed PATH and absolute HOME are required.");
     // Relative/empty PATH entries are interpreted at the intended seat cwd,
@@ -104,7 +104,7 @@ export class ClaudeManagedLaunch {
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
     if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
-    if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
+    if (claudeClassicRendererEnvPrefix(this.rendererEnv, session)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
     for (const dir of search) {
       const candidate = path.join(dir, "claude");
@@ -135,7 +135,7 @@ export class ClaudeManagedLaunch {
       || (target.pane != null && target.pane !== before.pane)) {
       throw new Error("Claude managed launch target disagrees with the current binding; no input or selection changed.");
     }
-    const context = this.context(cwd);
+    const context = this.context(cwd, before.session ?? undefined);
     // This is the existing managed session channel, not arbitrary shell variables.
     // Filter out the explicit capability environment and overwrite launch identity.
     const inherited = Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
@@ -143,7 +143,7 @@ export class ClaudeManagedLaunch {
     if (inherited.some(key => !/^[A-Z_][A-Z0-9_]*$/.test(key))) throw new Error("Invalid managed environment key.");
     const assertCurrent = () => {
       if (JSON.stringify(this.target(target.nodeId)) !== JSON.stringify(before)
-        || JSON.stringify(this.context(cwd)) !== JSON.stringify(context)
+        || JSON.stringify(this.context(cwd, before.session ?? undefined)) !== JSON.stringify(context)
         || JSON.stringify(Object.keys(this.sessionEnv).filter(key => this.sessionEnv[key] !== undefined
           && !["PATH", "HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"].includes(key))) !== JSON.stringify(inherited)) {
         throw new Error("Claude managed launch context changed during capability discovery/input; retry explicitly.");

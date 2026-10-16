@@ -1,6 +1,6 @@
 import { mockShellCommand } from "./helpers/shell-command-mock.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { yoloEnabled, codexPostureArg, piTrust } from "../src/adapters/yolo-mode.js";
+import { yoloEnabled, codexPostureArg, piTrust, claudeClassicRendererEnvPrefix } from "../src/adapters/yolo-mode.js";
 import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
@@ -149,5 +149,16 @@ describe("OPR.0.4.8.2 YOLO mode — opt-in, default OFF, launch-flag surface onl
     expect(piTrust(undefined, {} as NodeJS.ProcessEnv)).toBe("no-approve");
     expect(piTrust("approve", {} as NodeJS.ProcessEnv)).toBe("approve");
     expect(piTrust("no-approve", { OPENRIG_YOLO: "1" } as NodeJS.ProcessEnv)).toBe("approve");
+  });
+});
+
+describe("claudeClassicRendererEnvPrefix per seat", () => {
+  it("keeps a listed seat in the fullscreen renderer and every other seat classic", () => {
+    const env = { OPENRIG_CLAUDE_FULLSCREEN_SEATS: " orch-lead@dcwiz , other@r " };
+    expect(claudeClassicRendererEnvPrefix(env, "orch-lead@dcwiz")).toBe("");
+    expect(claudeClassicRendererEnvPrefix(env, "other@r")).toBe("");
+    expect(claudeClassicRendererEnvPrefix(env, "canvas-owner@dcwiz")).toBe("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ");
+    expect(claudeClassicRendererEnvPrefix(env)).toBe("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ");
+    expect(claudeClassicRendererEnvPrefix({}, "orch-lead@dcwiz")).toBe("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ");
   });
 });

@@ -98,7 +98,16 @@ export function piTrust(
  * Returns a command PREFIX ("VAR=1 ", trailing space) to prepend to the `claude`
  * launch command, or "" when disabled (then the command is byte-identical to pre-OPR.0.5.3.1).
  */
-export function claudeClassicRendererEnvPrefix(env: NodeJS.ProcessEnv = process.env): string {
+export function claudeClassicRendererEnvPrefix(env: NodeJS.ProcessEnv = process.env, session?: string): string {
   const v = env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN;
-  return v === "0" || v === "false" ? "" : "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ";
+  if (v === "0" || v === "false") return "";
+  // Seats a person drives directly (clicks, mod panels) can keep Claude's fullscreen renderer, which is the one
+  // that takes mouse input: OPENRIG_CLAUDE_FULLSCREEN_SEATS (setting terminal.claude_fullscreen_seats) lists them.
+  if (session && claudeFullscreenSeats(env).has(session)) return "";
+  return "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 ";
+}
+
+/** The seats (session names) that launch Claude in its fullscreen renderer. */
+export function claudeFullscreenSeats(env: NodeJS.ProcessEnv = process.env): Set<string> {
+  return new Set((env.OPENRIG_CLAUDE_FULLSCREEN_SEATS ?? "").split(",").map((s) => s.trim()).filter(Boolean));
 }

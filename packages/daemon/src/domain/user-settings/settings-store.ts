@@ -187,6 +187,9 @@ export const SETTINGS_VALID_KEYS = [
   // and by the CLI's direct terminal calls; twin of the CLI keys.
   "terminal.backend",
   "terminal.herdr_session",
+  // Seats (session names, comma-separated) whose Claude keeps its fullscreen renderer, the one that takes mouse
+  // input; every other Claude seat launches classic for scrollback. Read at each launch; twin of the CLI key.
+  "terminal.claude_fullscreen_seats",
   // Slice 15 (OPR.0.7.0.15) — compact command-output defaults; CLI-read, twin of the CLI key.
   "output.compact",
   "output.whoami_peers",
@@ -301,6 +304,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.backend": { primary: "OPENRIG_TERMINAL_BACKEND" },
   "terminal.herdr_session": { primary: "OPENRIG_HERDR_SESSION" },
+  "terminal.claude_fullscreen_seats": { primary: "OPENRIG_CLAUDE_FULLSCREEN_SEATS" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
@@ -387,6 +391,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.backend": ["terminal", "backend"],
   "terminal.herdr_session": ["terminal", "herdrSession"],
+  "terminal.claude_fullscreen_seats": ["terminal", "claudeFullscreenSeats"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
@@ -668,6 +673,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "terminal.status_bar": return false;
     case "terminal.backend": return "tmux";
     case "terminal.herdr_session": return "";
+    case "terminal.claude_fullscreen_seats": return "";
     case "output.compact": return false;
     case "output.whoami_peers": return 8;
     case "provider.usage_windows": return false;
