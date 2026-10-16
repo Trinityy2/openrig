@@ -1478,3 +1478,17 @@ describe("delivery guard unset", () => {
     expect(await h.adapter.killSession("ng@r")).toEqual({ ok: true });
   });
 });
+
+describe("pane_current_command under a launch subshell", () => {
+  it("reports the runtime, not the subshell that leads the foreground group", async () => {
+    await h.adapter.createSession("sub@r");
+    const pane = h.fake.paneOf("sub@r");
+    const mux = new HerdrMux({
+      fallbackExec: async () => "",
+      rpc: async (req) => req.method === "pane.process_info"
+        ? { type: "process_info", process_info: { shell_pid: pane.shellPid, foreground_process_group_id: 101, foreground_processes: [{ pid: 102, name: "claude" }, { pid: 101, name: "zsh" }] } }
+        : h.fake.rpc(req),
+    });
+    expect(await new TmuxAdapter(mux.exec, undefined, mux.argvExec).getPaneCommand("sub@r")).toBe("claude");
+  });
+});

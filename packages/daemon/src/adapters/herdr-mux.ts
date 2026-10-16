@@ -42,6 +42,7 @@ const METADATA_SOURCE = "openrig";
 /** herdr reads at most about this many lines of history per request. */
 const MAX_READ_LINES = 1000;
 const DEFAULT_ROWS = 40;
+const SHELL_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "tcsh", "csh"]);
 const DEFAULT_COLS = 120;
 
 export interface HerdrMuxOptions {
@@ -489,8 +490,12 @@ export class HerdrMux {
       if (shellPid > 0) this.shellPids.set(shellPid, pane.terminal_id);
       const fg = info.foreground_processes ?? [];
       const shellForeground = fg.length === 0 || fg.some((p) => p.pid === shellPid) || info.foreground_process_group_id === shellPid;
+      // The job a seat runs: a launch wraps the runtime in a subshell that leads the foreground group, so the
+      // group leader can be a shell while the runtime runs under it. Report the runtime, as tmux shows it.
+      const nameOf = (p: { name?: string; argv0?: string } | undefined) => (p?.name || p?.argv0 || "").replace(/^-/, "");
       const lead = fg.find((p) => p.pid === info.foreground_process_group_id) ?? fg[0];
-      const command = (lead?.name || lead?.argv0 || "").replace(/^-/, "") || null;
+      const job = fg.find((p) => !SHELL_NAMES.has(nameOf(p)));
+      const command = nameOf(job ?? lead) || null;
       return { shellPid, foregroundGroup: info.foreground_process_group_id ?? null, command, shellForeground };
     } catch {
       return null;
