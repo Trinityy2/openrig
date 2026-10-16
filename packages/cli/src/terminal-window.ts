@@ -8,6 +8,7 @@ import type { DaemonClient } from "./client.js";
 import { shellQuote } from "./cross-host-executor.js";
 import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import type { OpenViewResult } from "./commands/terminal.js";
+import { cliTerminalBackend, defaultHerdrExec, focusHerdrSeat, herdrShellCommand, type HerdrExecFn, type TerminalBackend } from "./terminal-backend.js";
 
 interface Pane { seat: string; label: string; paneCommand: string }
 interface HerdrTab { workspace_id: string; tab_id: string; label: string }
@@ -29,6 +30,10 @@ export interface WindowDeps {
   /** Hosting terminal measurement also works for an agent shell tool with piped stdio. */
   columns?(): Promise<number | undefined>;
   notice?(message: string): void;
+  /** The multiplexer that runs the seats. Absent: tmux (the seats are tmux sessions to attach). */
+  backend?: TerminalBackend;
+  /** herdr CLI runner for the herdr backend (default: the real herdr against the backend's server). */
+  herdrExec?: HerdrExecFn;
 }
 
 export function defaultWindowDeps(): WindowDeps {
@@ -36,7 +41,7 @@ export function defaultWindowDeps(): WindowDeps {
   delete env["TMUX"];
   const run = promisify(execFile);
   return {
-    platform: process.platform, env, exists: existsSync,
+    platform: process.platform, env, exists: existsSync, backend: cliTerminalBackend(),
     exec: async (file, args, timeoutMs = 10_000) => (await run(file, args, { env, encoding: "utf8", timeout: timeoutMs })).stdout,
     launch: (file, args) => new Promise((resolve, reject) => {
       const child = spawn(file, args, { env, detached: true, stdio: "ignore" });
@@ -266,6 +271,38 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
     if (!localDaemon(client.baseUrl)) throw new Error("The window launcher must run on the daemon's own desktop; the configured daemon is remote.");
     if (requestedProvider && !["herdr", "tmux"].includes(requestedProvider)) throw new Error("--window supports herdr or tmux. Use cmux without --window.");
     const launchWindow = await windowLauncher(deps, windowNotes);
+    if (deps.backend?.kind === "herdr") {
+      // herdr backend: the seats already run as herdr panes. Bring the herdr client to the view's first seat
+      // instead of composing tmux attachments into a viewer.
+      const backend = deps.backend;
+      provider = "herdr";
+      if (requestedProvider === "tmux") throw new Error("terminal.backend is herdr: seats run as herdr panes, so --window supports only --provider herdr.");
+      const preview = await client.get<Preview | OpenViewResult>(`/api/terminal/preview?view=${encodeURIComponent(view)}&provider=herdr`);
+      if (preview.status >= 400 || !("composed" in preview.data)) {
+        return failed((preview.data as OpenViewResult).error ?? "Could not compose the requested view.");
+      }
+      const { composed, planId } = preview.data;
+      if (expectedPlan !== undefined && expectedPlan !== planId) {
+        return failure(provider, "The terminal view changed since preview. Refresh the preview before opening.");
+      }
+      const seat = composed.opened[0]?.seat;
+      if (!seat) return { ...failed("No conversations are attachable."), absent: composed.absent, degraded: composed.degraded };
+      const focused = focusHerdrSeat(seat, deps.herdrExec ?? defaultHerdrExec(backend, deps.env));
+      if (!focused) return { ...failed(`herdr holds no pane for seat ${seat}; it may be stopped.`), absent: composed.absent, degraded: composed.degraded };
+      const others = composed.opened.slice(1).map(pane => pane.seat);
+      const notes = [`Focused seat ${seat} in herdr (workspace ${focused.workspace_id}, tab ${focused.tab_id}).`,
+        ...(others.length ? [`The view's other seats are herdr tabs too: ${others.join(", ")}.`] : [])];
+      manualCommand = herdrShellCommand(backend, []);
+      if (typeof launchWindow === "string") {
+        return { ...failure(provider, `No terminal window was opened. ${launchWindow} Open a terminal on the daemon's host and run: ${manualCommand}`), windowAttempted: false, absent: composed.absent, degraded: composed.degraded, notes: [...notes, ...windowNotes] };
+      }
+      if (typeof launchWindow === "function") {
+        windowAttempted = true;
+        window = await launchWindow(manualCommand);
+      } else currentHerdr = true;
+      return { provider, ok: true, opened: composed.opened.map(pane => pane.seat), absent: composed.absent, degraded: composed.degraded, pages: 1, ...(window ? { window } : {}),
+        notes: [...notes, ...windowNotes, currentHerdr ? "Using the current Herdr session; no terminal window was opened." : "Check the new terminal shows herdr on the seat; window creation alone is not visual confirmation."] };
+    }
     const measured = typeof launchWindow !== "string" ? await deps.columns?.().catch(() => undefined) : undefined;
     let viewportColumns = Number.isSafeInteger(measured) && measured! > 0 ? measured : undefined;
     const herdr = requestedProvider === "tmux" ? null : await herdrBinary(deps);

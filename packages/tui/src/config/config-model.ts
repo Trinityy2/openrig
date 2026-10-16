@@ -71,6 +71,8 @@ const LABELS: Record<string, string> = {
   "usage.pi_cost_facts": "Pi cost from persisted entries",
   "usage.pi_openrouter_charge": "OpenRouter charge for Pi requests",
   "transport.verify_input_box": "Verify by input box (Claude Code, Codex)",
+  "terminal.backend": "Terminal backend (tmux or herdr)",
+  "terminal.herdr_session": "herdr session",
   "ui.enabled": "Web UI",
   "health.context_pressure.warning_percent": "Context warning threshold",
   "health.context_pressure.critical_percent": "Context critical threshold",

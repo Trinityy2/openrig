@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { DaemonClient } from "./client.js";
+import { attachHerdrSeat, cliTerminalBackend, type HerdrExecFn, type TerminalBackend } from "./terminal-backend.js";
 
 interface SharedTuiClient {
   readonly baseUrl?: string;
@@ -29,7 +30,9 @@ export async function sharedTuiTarget(client: SharedTuiClient = new DaemonClient
   return terminal.canonicalSessionName;
 }
 
-export async function attachSharedTui(target: string): Promise<number> {
+export async function attachSharedTui(target: string, backend: TerminalBackend = cliTerminalBackend(), herdrExec?: HerdrExecFn): Promise<number> {
+  // herdr backend: the shared terminal is a herdr pane; bring the herdr client to it.
+  if (backend.kind === "herdr") return attachHerdrSeat(target, backend, herdrExec);
   // Attach a new client even inside tmux. switch-client would retarget somebody
   // else's client when invoked from an agent's child shell.
   return new Promise((resolve, reject) => {

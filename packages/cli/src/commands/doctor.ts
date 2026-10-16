@@ -14,6 +14,7 @@ import {
   resolveCmuxSettingsPath,
 } from "../cmux-config.js";
 import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
+import { buildHerdrControlFailure, cliTerminalBackend, probeHerdrControl, type TerminalBackend } from "../terminal-backend.js";
 import { parse as parseYaml } from "yaml";
 import { compareSpecToLive, topologyFromRigSpec, topologyFromLiveLogicalIds } from "@openrig/daemon/spec-conformance";
 import { classifyNodeVersion } from "../node-support.js";
@@ -51,6 +52,27 @@ export interface DoctorDeps {
   specPath?: string;
   /** Live seat ids (`<pod>.<member>`) for the spec's rig; null when the topology cannot be read. */
   fetchLiveLogicalIds?: (rigName: string) => Promise<string[] | null>;
+  /** The multiplexer that runs the seats (default: resolved from configStore + env). */
+  terminalBackend?: TerminalBackend;
+}
+
+/** herdr backend: no tmux is needed; herdr must be installed and its control socket healthy. */
+function herdrDoctorCheck(deps: DoctorDeps, backend: TerminalBackend): DoctorCheck {
+  const probe = probeHerdrControl((cmd) => deps.exec(cmd), backend);
+  if (probe.code === "not_installed") {
+    return {
+      name: "herdr",
+      status: "fail",
+      message: "herdr not found.",
+      reason: "terminal.backend is herdr: OpenRig runs every seat as a herdr pane.",
+      fix: "Install herdr (rig setup, or curl -fsSL https://herdr.dev/install.sh | sh), or run rig config set terminal.backend tmux.",
+    };
+  }
+  if (probe.available) {
+    return { name: "herdr", status: "pass", message: probe.code === "no_server" ? `${probe.version} (no server yet; the daemon starts one with the first seat)` : probe.version! };
+  }
+  const failure = buildHerdrControlFailure(probe.detail ?? "unknown herdr control failure");
+  return { name: "herdr", status: "fail", message: failure.message, reason: failure.reason, fix: failure.fix };
 }
 
 const DEFAULT_PORT = 7433;
@@ -115,9 +137,12 @@ export function runDoctorChecks(deps: DoctorDeps, providerChecks: DoctorCheck[] 
     });
   }
 
-  // 4. tmux
-  const tmuxProbe = probeTmuxControl((cmd) => deps.exec(cmd));
-  if (tmuxProbe.code === "not_installed") {
+  // 4. tmux (herdr instead, when the herdr backend runs the seats)
+  const backend = deps.terminalBackend ?? cliTerminalBackend(deps.configStore);
+  const tmuxProbe = backend.kind === "herdr" ? null : probeTmuxControl((cmd) => deps.exec(cmd));
+  if (!tmuxProbe) {
+    checks.push(herdrDoctorCheck(deps, backend));
+  } else if (tmuxProbe.code === "not_installed") {
     checks.push({
       name: "tmux",
       status: "fail",

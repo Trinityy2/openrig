@@ -147,6 +147,8 @@ export interface AppDeps {
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
   /** S20 — effective bind plan for the health surface (absent = legacy body). */
   bindPlan?: { mode: "explicit" | "default"; hosts: string[]; tailscaleDetected: boolean; ignoredRoutingHost?: string };
+  /** Which multiplexer runs the seats, for the health surface (absent = legacy body). */
+  terminalBackend?: { kind: "tmux" | "herdr"; herdrSession?: string };
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
   /** P7 — daemon lifecycle record store + this boot's epoch (heartbeat + clean-shutdown). */
@@ -702,8 +704,10 @@ export function createApp(deps: AppDeps): Hono {
     // S01 — the wake ladder's heartbeat is half of the operator rung's honest delivery
     // floor (escalation view + daemon-health); same additive contract.
     const wakeLadder = deps.wakeLadderStatus ? { wakeLadder: deps.wakeLadderStatus.snapshot() } : {};
+    // Which multiplexer runs the seats (tmux | herdr), so the CLI can ask the daemon it talks to.
+    const terminalBackend = deps.terminalBackend ? { terminalBackend: deps.terminalBackend } : {};
     if (!monitor) {
-      return c.json({ status: "ok", pid: process.pid, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder });
+      return c.json({ status: "ok", pid: process.pid, ...stamp, ...selfHost, ...slowOperations, ...bind, ...stuckSweep, ...wakeLadder, ...terminalBackend });
     }
     const eventLoop = monitor.snapshot();
     return c.json({
@@ -717,6 +721,7 @@ export function createApp(deps: AppDeps): Hono {
       ...bind,
       ...stuckSweep,
       ...wakeLadder,
+      ...terminalBackend,
     });
   });
 

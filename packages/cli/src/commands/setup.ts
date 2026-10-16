@@ -10,6 +10,7 @@ import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
 import { ConfigStore } from "../config-store.js";
 import { buildTmuxControlFailure, probeTmuxControl } from "../tmux-health.js";
+import { cliTerminalBackend, type TerminalBackend } from "../terminal-backend.js";
 import { checkClaudeAuth, checkCodexAuth } from "../provider-auth.js";
 
 export interface SetupStep {
@@ -55,6 +56,8 @@ export interface SetupDeps {
   platform?: NodeJS.Platform;
   /** Environment for CODEX_HOME and provider credential checks (default process.env). */
   env?: NodeJS.ProcessEnv;
+  /** The multiplexer that runs the seats (default: terminal.backend from config + env). With herdr, no tmux is set up. */
+  terminalBackend?: TerminalBackend;
 }
 
 // Preserve the setup module's existing selector export.
@@ -347,6 +350,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // Core steps
+  const herdrBackend = (deps.terminalBackend ?? cliTerminalBackend()).kind === "herdr";
   // 1. Homebrew (macOS-first setup path)
   let brewOk = false;
   if (platform !== "darwin") {
@@ -371,9 +375,11 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     }
   }
 
-  // 2. tmux
-  const tmuxProbe = probeTmuxControl((cmd) => deps.exec(cmd));
-  if (tmuxProbe.code === "not_installed") {
+  // 2. tmux (not needed when the herdr backend runs the seats)
+  const tmuxProbe = herdrBackend ? null : probeTmuxControl((cmd) => deps.exec(cmd));
+  if (!tmuxProbe) {
+    steps.push({ id: "tmux_install", status: "skipped", message: "Skipped: terminal.backend is herdr; seats run as herdr panes, so tmux is not needed." });
+  } else if (tmuxProbe.code === "not_installed") {
     if (!brewOk) {
       steps.push({ id: "tmux_install", status: "skipped", message: "Skipped: Homebrew not available.", reason: "tmux install requires Homebrew." });
     } else {
@@ -398,7 +404,18 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
   }
 
   // 3. Herdr is the default view provider. Leave optional cmux installations untouched.
-  steps.push(opts.herdr === false
+  // With the herdr backend it also runs the seats, so it is required, not optional.
+  if (herdrBackend) {
+    const step: SetupStep = opts.herdr === false
+      ? { id: "herdr_install", status: "fail", message: "herdr installation declined (--no-herdr), but terminal.backend is herdr." }
+      : installHerdr(deps, platform);
+    steps.push(step.status === "pass" || step.status === "applied" ? step : {
+      ...step,
+      status: "fail",
+      reason: "terminal.backend is herdr: OpenRig runs every seat as a herdr pane.",
+      fixHint: step.fixHint ?? "Install herdr (https://herdr.dev/docs/install/), or run rig config set terminal.backend tmux.",
+    });
+  } else steps.push(opts.herdr === false
     ? { id: "herdr_install", status: "skipped", message: "Skipped: herdr installation declined (--no-herdr)." }
     : installHerdr(deps, platform));
   steps.push(installGhostty(deps, platform, opts.ghostty));
@@ -461,7 +478,7 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     steps.push({ id: codexName, ...codexAuth, ...(codexFix ? { fixHint: codexFix } : {}) });
   }
 
-  // 6. tmux config
+  // 6. tmux config (none with the herdr backend: no tmux runs the seats)
   const TMUX_CONF = `${process.env["HOME"] ?? "~"}/.tmux.conf`;
   const MANAGED_MARKER = "# OpenRig managed block";
   const MANAGED_BLOCK = [
@@ -471,7 +488,9 @@ export async function runSetup(deps: SetupDeps, opts: { dryRun?: boolean; full?:
     `# End ${MANAGED_MARKER}`,
   ].join("\n");
 
-  try {
+  if (herdrBackend) {
+    steps.push({ id: "tmux_config", status: "skipped", message: "Skipped: terminal.backend is herdr; ~/.tmux.conf is left unchanged." });
+  } else try {
     const existing = deps.readFile(TMUX_CONF);
     if (existing && existing.includes(MANAGED_MARKER)) {
       // Replace existing managed block

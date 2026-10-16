@@ -13,6 +13,7 @@ import { emitCrossHostError, emitCrossHostFailure } from "../cross-host-cli-help
 import { ConfigStore } from "../config-store.js";
 import { compactOutputEnabled } from "../queue-receipt.js";
 import { shellQuote } from "../cross-host-executor.js";
+import { cliTerminalBackend, defaultHerdrExec, herdrSeatForPane, type HerdrExecFn, type TerminalBackend } from "../terminal-backend.js";
 
 interface WhoamiCliOptions {
   nodeId?: string;
@@ -201,11 +202,14 @@ function buildPartialWhoamiResult(source: { nodeId?: string; sessionName?: strin
  * 5. TMUX_PANE → @rigged_node_id tmux metadata
  * 6. TMUX_PANE → @rigged_session_name tmux metadata
  * 7. TMUX_PANE → tmux display-message (raw session name)
- * 8. fail
+ * 8. herdr backend, no TMUX_PANE: HERDR_PANE_ID → the seat whose herdr tab holds that pane (its openrig_session token)
+ * 9. fail
  */
 export function resolveIdentitySource(
   opts: { nodeId?: string; session?: string },
   tmuxExec: TmuxExecFn = defaultTmuxExec,
+  backend?: TerminalBackend,
+  herdrExec?: HerdrExecFn,
 ): { nodeId?: string; sessionName?: string } | null {
   if (opts.nodeId) return { nodeId: opts.nodeId };
   if (opts.session) return { sessionName: opts.session };
@@ -241,6 +245,23 @@ export function resolveIdentitySource(
       if (sessionName) return { sessionName };
     } catch {
       // tmux not available or pane not found — skip
+    }
+  }
+
+  // herdr backend: a seat's shell runs in a herdr pane, not tmux.
+  const herdrPane = process.env["HERDR_PANE_ID"];
+  if (!tmuxPane && herdrPane) {
+    let resolved: TerminalBackend | undefined = backend;
+    if (!resolved) {
+      try { resolved = cliTerminalBackend(); } catch { resolved = undefined; }
+    }
+    if (resolved?.kind === "herdr") {
+      try {
+        const sessionName = herdrSeatForPane(herdrPane, herdrExec ?? defaultHerdrExec(resolved));
+        if (sessionName) return { sessionName };
+      } catch {
+        // herdr not reachable or pane not found — skip
+      }
     }
   }
 

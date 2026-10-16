@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import type { ConfigStore, RiggedConfig } from "./config-store.js";
 import type { DaemonStatus } from "./daemon-lifecycle.js";
 import { buildTmuxControlFailure, probeTmuxControlAsync } from "./tmux-health.js";
+import { buildHerdrControlFailure, cliTerminalBackend, probeHerdrControlAsync } from "./terminal-backend.js";
 import { classifyNodeVersion } from "./node-support.js";
 
 export interface PreflightCheck {
@@ -143,9 +144,26 @@ export class SystemPreflight {
       });
     }
 
-    // 2. tmux availability
-    const tmuxProbe = await probeTmuxControlAsync(this.deps.exec);
-    if (tmuxProbe.code === "not_installed") {
+    // 2. tmux availability (herdr instead, when the herdr backend runs the seats: no tmux is needed)
+    const backend = cliTerminalBackend(this.deps.configStore);
+    const tmuxProbe = backend.kind === "herdr" ? null : await probeTmuxControlAsync(this.deps.exec);
+    if (!tmuxProbe) {
+      const herdrProbe = await probeHerdrControlAsync(this.deps.exec, backend);
+      if (herdrProbe.code === "not_installed") {
+        checks.push({
+          name: "herdr",
+          ok: false,
+          error: "herdr was not found in PATH.",
+          reason: "terminal.backend is herdr: OpenRig runs every seat as a herdr pane.",
+          fix: "Install herdr (rig setup, or curl -fsSL https://herdr.dev/install.sh | sh), or run rig config set terminal.backend tmux.",
+        });
+      } else if (herdrProbe.available) {
+        checks.push({ name: "herdr", ok: true });
+      } else {
+        const failure = buildHerdrControlFailure(herdrProbe.detail ?? "unknown herdr control failure");
+        checks.push({ name: "herdr", ok: false, error: failure.message, reason: failure.reason, fix: failure.fix });
+      }
+    } else if (tmuxProbe.code === "not_installed") {
       checks.push({
         name: "tmux",
         ok: false,

@@ -47,6 +47,8 @@ for (const key of [
   "PROVIDER_USAGE_WINDOWS",
   // A seat with input-box verification on must not change what the transport suites verify.
   "TRANSPORT_VERIFY_INPUT_BOX",
+  // A seat on the herdr backend must not move the suite's tmux expectations onto herdr.
+  "TERMINAL_BACKEND", "HERDR_SESSION", "HERDR_SOCKET",
 ]) {
   delete process.env[`OPENRIG_${key}`];
   delete process.env[`RIGGED_${key}`];

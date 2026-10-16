@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import Database from "better-sqlite3";
+import { cliTerminalBackend, closeHerdrSeat, defaultHerdrExec, type HerdrExecFn, type TerminalBackend } from "./terminal-backend.js";
 
 export const DESTROY_CONFIRM_TOKEN = "destroy-openrig-state";
 
@@ -284,7 +285,13 @@ export function findListeningPidWithLsof(port: number): number | null {
   }
 }
 
-export function killTmuxSessionWithCli(sessionName: string): boolean {
+/**
+ * End a seat's terminal session. tmux: `tmux kill-session`. herdr backend: close the seat's herdr tab (destroy runs
+ * after the daemon stops, so this talks to herdr directly).
+ */
+export function killTmuxSessionWithCli(sessionName: string, backend?: TerminalBackend, herdrExec?: HerdrExecFn): boolean {
+  const resolved = backend ?? cliTerminalBackend();
+  if (resolved.kind === "herdr") return closeHerdrSeat(sessionName, herdrExec ?? defaultHerdrExec(resolved));
   try {
     execFileSync("tmux", ["kill-session", "-t", sessionName], { stdio: "ignore" });
     return true;
